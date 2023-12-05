@@ -8,6 +8,7 @@ Created on Sun Feb 13 21:34:55 2022.
 
 
 import logging
+import re
 import tempfile
 from dataclasses import dataclass
 
@@ -182,8 +183,10 @@ class RemoteHandler:
 
         print_stdout = False
         exit_status = 0
+        ansi_escape_sequence_regex = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
         for line in self.stdout:
             line = str(line).strip("\n").strip()
+            line = ansi_escape_sequence_regex.sub("", line).strip()
             if line.endswith(cmd):
                 # up to now everything was login and stdin
                 print_stdout = True
