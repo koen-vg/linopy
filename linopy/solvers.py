@@ -23,6 +23,9 @@ from linopy.constants import (
     Status,
     TerminationCondition,
 )
+from linopy.variables import Variables, Variable
+from linopy.constraints import Constraints, Constraint
+from linopy.io import read_netcdf
 
 QUADRATIC_SOLVERS = [
     "gurobi",
@@ -573,6 +576,7 @@ def run_gurobi(
     log_fn=None,
     warmstart_fn=None,
     basis_fn=None,
+    model_fn=None,
     keep_files=False,
     env=None,
     **solver_options,
@@ -606,6 +610,7 @@ def run_gurobi(
     log_fn = maybe_convert_path(log_fn)
     warmstart_fn = maybe_convert_path(warmstart_fn)
     basis_fn = maybe_convert_path(basis_fn)
+    model_fn = maybe_convert_path(model_fn)
 
     with contextlib.ExitStack() as stack:
         if env is None:
@@ -614,6 +619,13 @@ def run_gurobi(
         if io_api is None or io_api in ["lp", "mps"]:
             problem_fn = model.to_file(problem_fn)
             problem_fn = maybe_convert_path(problem_fn)
+
+            # Temporarily save model to file and delete variables and
+            # constraints from memory.
+            model.to_netcdf(model_fn)
+            del model._variables
+            del model._constraints
+
             m = gurobipy.read(problem_fn, env=env)
         elif io_api == "direct":
             problem_fn = None
@@ -664,7 +676,19 @@ def run_gurobi(
     solution = safe_get_solution(status, get_solver_solution)
     maybe_adjust_objective_sign(solution, model.objective.sense, io_api)
 
-    return Result(status, solution, m)
+    # After getting the solution, we can delete the gurobi model
+    del m
+
+    # Reload model variables and constraints
+    saved_m = read_netcdf(model_fn)
+    model._variables = Variables(model=model)
+    for name, var in saved_m.variables.items():
+        model.variables.add(Variable(var.data, model, name))
+    model._constraints = Constraints(model=model)
+    for name, con in saved_m.constraints.items():
+        model.constraints.add(Constraint(con.data, model, name))
+
+    return Result(status, solution, None)
 
 
 def run_scip(

@@ -925,12 +925,30 @@ class Model:
         with NamedTemporaryFile(**kwargs) as f:
             return f.name
 
+    def get_model_file(self, model_fn=None):
+        """
+        Get a fresh created model file if model file is None.
+        """
+        if model_fn is not None:
+            return model_fn
+
+        kwargs = dict(
+            prefix="linopy-model-",
+            suffix=".nc",
+            mode="w",
+            dir=self.solver_dir,
+            delete=False,
+        )
+        with NamedTemporaryFile(**kwargs) as f:
+            return f.name
+
     def solve(
         self,
         solver_name=None,
         io_api=None,
         problem_fn=None,
         solution_fn=None,
+        model_fn=None,
         log_fn=None,
         basis_fn=None,
         warmstart_fn=None,
@@ -1005,6 +1023,7 @@ class Model:
                 io_api=io_api,
                 problem_fn=problem_fn,
                 solution_fn=solution_fn,
+                model_fn=model_fn,
                 log_fn=log_fn,
                 basis_fn=basis_fn,
                 warmstart_fn=warmstart_fn,
@@ -1046,6 +1065,7 @@ class Model:
 
         problem_fn = self.get_problem_file(problem_fn, io_api=io_api)
         solution_fn = self.get_solution_file(solution_fn)
+        model_fn = self.get_model_file()
 
         if sanitize_zeros:
             self.constraints.sanitize_zeros()
@@ -1062,6 +1082,7 @@ class Model:
                 io_api=io_api,
                 problem_fn=problem_fn,
                 solution_fn=solution_fn,
+                model_fn=model_fn,
                 log_fn=log_fn,
                 warmstart_fn=warmstart_fn,
                 basis_fn=basis_fn,
@@ -1070,7 +1091,7 @@ class Model:
                 **solver_options,
             )
         finally:
-            for fn in (problem_fn, solution_fn):
+            for fn in (problem_fn, solution_fn, model_fn):
                 if fn is not None and (os.path.exists(fn) and not keep_files):
                     os.remove(fn)
 
