@@ -594,6 +594,7 @@ def run_gurobi(
     model_fn=None,
     keep_files=False,
     env=None,
+    return_model=False,
     **solver_options,
 ):
     """
@@ -692,7 +693,9 @@ def run_gurobi(
     maybe_adjust_objective_sign(solution, model.objective.sense, io_api)
 
     # After getting the solution, we can delete the gurobi model
-    del m
+    if not return_model:
+        del m
+        m = None
 
     # Reload model variables and constraints
     saved_m = read_netcdf(model_fn)
@@ -703,7 +706,7 @@ def run_gurobi(
     for name, con in saved_m.constraints.items():
         model.constraints.add(Constraint(con.data, model, name))
 
-    return Result(status, solution, None)
+    return Result(status, solution, m)
 
 
 def run_scip(
