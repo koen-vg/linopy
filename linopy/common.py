@@ -400,6 +400,14 @@ def get_label_position(obj, values):
         raise ValueError("Array's with more than two dimensions is not supported")
 
 
+def set_int_index(series):
+    """
+    Convert string index to int index.
+    """
+    series.index = series.index.str[1:].astype(int)
+    return series
+
+
 def print_coord(coord):
     if isinstance(coord, dict):
         coord = coord.values()

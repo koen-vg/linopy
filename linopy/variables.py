@@ -30,11 +30,11 @@ from linopy.common import (
     print_coord,
     print_single_variable,
     save_join,
+    set_int_index,
     to_dataframe,
 )
 from linopy.config import options
 from linopy.constants import TERM_DIM
-from linopy.solvers import set_int_index
 
 logger = logging.getLogger(__name__)
 

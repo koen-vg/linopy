@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from linopy.common import set_int_index
 from linopy.constants import (
     Result,
     Solution,
@@ -24,9 +25,9 @@ from linopy.constants import (
     Status,
     TerminationCondition,
 )
-from linopy.variables import Variables, Variable
-from linopy.constraints import Constraints, Constraint
+from linopy.constraints import Constraint, Constraints
 from linopy.io import read_netcdf
+from linopy.variables import Variable, Variables
 
 QUADRATIC_SOLVERS = [
     "gurobi",
@@ -137,14 +138,6 @@ def maybe_adjust_objective_sign(solution, sense, io_api):
             "Adjusting objective sign due to switched coefficients in MPS file."
         )
         solution.objective *= -1
-
-
-def set_int_index(series):
-    """
-    Convert string index to int index.
-    """
-    series.index = series.index.str[1:].astype(int)
-    return series
 
 
 def maybe_convert_path(path):
@@ -984,9 +977,9 @@ def run_mosek(
                             if o.group(1) is not None:
                                 key = o.group(1)
                                 try:
-                                    skx[m.getvarnameindex(o.group(2))] = (
-                                        mosek.stakey.basis
-                                    )
+                                    skx[
+                                        m.getvarnameindex(o.group(2))
+                                    ] = mosek.stakey.basis
                                 except:
                                     pass
                                 try:
