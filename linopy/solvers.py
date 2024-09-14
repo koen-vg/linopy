@@ -666,13 +666,15 @@ def run_gurobi(
             env = stack.enter_context(gurobipy.Env())
 
         if io_api is None or io_api in FILE_IO_APIS:
+            problem_fn = model.to_file(problem_fn, io_api=io_api)
+
             # Temporarily save model to file and delete variables and
             # constraints from memory.
-            model.to_netcdf(path_to_string(model_fn))
-            del model._variables
-            del model._constraints
+            if model_fn:
+                model.to_netcdf(path_to_string(model_fn))
+                del model._variables
+                del model._constraints
             
-            problem_fn = model.to_file(problem_fn, io_api=io_api)
             m = gurobipy.read(path_to_string(problem_fn), env=env)
         elif io_api == "direct":
             problem_fn = None
@@ -735,13 +737,14 @@ def run_gurobi(
         m = None
 
     # Reload model variables and constraints
-    saved_m = read_netcdf(model_fn)
-    model._variables = Variables(model=model)
-    for name, var in saved_m.variables.items():
-        model.variables.add(Variable(var.data, model, name))
-    model._constraints = Constraints(model=model)
-    for name, con in saved_m.constraints.items():
-        model.constraints.add(Constraint(con.data, model, name))
+    if model_fn:
+        saved_m = read_netcdf(model_fn)
+        model._variables = Variables(data={}, model=model)
+        for name, var in saved_m.variables.items():
+            model.variables.add(Variable(var.data, model, name))
+        model._constraints = Constraints(data={}, model=model)
+        for name, con in saved_m.constraints.items():
+            model.constraints.add(Constraint(con.data, model, name))
 
     return Result(status, solution, m)
 
