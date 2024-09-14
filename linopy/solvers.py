@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Linopy module for solving lp files with different solvers.
 """
 
+from __future__ import annotations
 
 import contextlib
 import io
@@ -13,9 +13,11 @@ import re
 import subprocess as sub
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 import pandas as pd
+from pandas.core.series import Series
 
 from linopy.common import set_int_index
 from linopy.constants import (
@@ -29,6 +31,9 @@ from linopy.constraints import Constraint, Constraints
 from linopy.io import read_netcdf
 from linopy.variables import Variable, Variables
 
+if TYPE_CHECKING:
+    from linopy.model import Model
+
 QUADRATIC_SOLVERS = [
     "gurobi",
     "xpress",
@@ -40,6 +45,9 @@ QUADRATIC_SOLVERS = [
     "mindopt",
 ]
 
+FILE_IO_APIS = ["lp", "lp-polars", "mps"]
+IO_APIS = FILE_IO_APIS + ["direct"]
+
 available_solvers = []
 
 which = "where" if os.name == "nt" else "which"
@@ -50,9 +58,17 @@ with contextlib.suppress(ImportError):
 
     available_solvers.append("gurobi")
 with contextlib.suppress(ImportError):
+    _new_highspy_mps_layout = None
     import highspy
 
     available_solvers.append("highs")
+    from importlib.metadata import version
+
+    if version("highspy") < "1.7.1":
+        _new_highspy_mps_layout = False
+    else:
+        _new_highspy_mps_layout = True
+
 if sub.run([which, "glpsol"], stdout=sub.DEVNULL, stderr=sub.STDOUT).returncode == 0:
     available_solvers.append("glpk")
 
@@ -113,7 +129,7 @@ io_structure = dict(
 )
 
 
-def safe_get_solution(status, func):
+def safe_get_solution(status: Status, func: Callable) -> Solution:
     """
     Get solution from function call, if status is unknown still try to run it.
     """
@@ -126,39 +142,49 @@ def safe_get_solution(status, func):
     return Solution()
 
 
-def maybe_adjust_objective_sign(solution, sense, io_api):
+def maybe_adjust_objective_sign(
+    solution: Solution, sense: str, io_api: str | None
+) -> None:
     if sense == "min":
         return
 
     if np.isnan(solution.objective):
         return
 
-    if io_api == "mps" and sys.version_info < (3, 12):
+    if io_api == "mps" and not _new_highspy_mps_layout:
         logger.info(
             "Adjusting objective sign due to switched coefficients in MPS file."
         )
         solution.objective *= -1
 
 
-def maybe_convert_path(path):
+def set_int_index(series: Series) -> Series:
+    """
+    Convert string index to int index.
+    """
+    series.index = series.index.str[1:].astype(int)
+    return series
+
+
+def path_to_string(path: Path) -> str:
     """
     Convert a pathlib.Path to a string.
     """
-    return str(path.resolve()) if isinstance(path, Path) else path
+    return str(path.resolve())
 
 
 def run_cbc(
-    model,
-    io_api=None,
-    problem_fn=None,
-    solution_fn=None,
-    log_fn=None,
-    warmstart_fn=None,
-    basis_fn=None,
-    keep_files=False,
-    env=None,
+    model: Model,
+    io_api: str | None = None,
+    problem_fn: Path | None = None,
+    solution_fn: Path | None = None,
+    log_fn: Path | None = None,
+    warmstart_fn: Path | None = None,
+    basis_fn: Path | None = None,
+    keep_files: bool = False,
+    env: None = None,
     **solver_options,
-):
+) -> Result:
     """
     Solve a linear problem using the cbc solver.
 
@@ -167,18 +193,18 @@ def run_cbc(
     and constraint dual values. For more information on the solver
     options, run 'cbc' in your shell
     """
-    if io_api is not None and io_api not in ["lp", "mps"]:
+    if io_api is not None and io_api not in FILE_IO_APIS:
         raise ValueError(
             "Keyword argument `io_api` has to be one of `lp`, `mps' or None"
         )
 
     # CBC does not like the OBJSENSE line in MPS files, which new highspy versions write
-    if io_api == "mps" and model.sense == "max" and sys.version_info >= (3, 12):
+    if io_api == "mps" and model.sense == "max" and _new_highspy_mps_layout:
         raise ValueError(
-            "GLPK does not support maximization in MPS format for Python 3.12+"
+            "CBC does not support maximization in MPS format highspy versions >=1.7.1"
         )
 
-    problem_fn = model.to_file(problem_fn)
+    problem_fn = model.to_file(problem_fn, io_api)
 
     # printingOptions is about what goes in solution file
     command = f"cbc -printingOptions all -import {problem_fn} "
@@ -196,12 +222,21 @@ def run_cbc(
     if basis_fn:
         command += f"-basisO {basis_fn} "
 
-    os.makedirs(os.path.dirname(solution_fn), exist_ok=True)
+    if solution_fn is None:
+        raise ValueError("No solution file specified")
+
+    Path(solution_fn).parent.mkdir(exist_ok=True)
 
     command = command.strip()
 
     if log_fn is None:
         p = sub.Popen(command.split(" "), stdout=sub.PIPE, stderr=sub.PIPE)
+
+        if p.stdout is None:
+            raise ValueError(
+                f"Command `{command}` did not run successfully. Check if cbc is installed and in PATH."
+            )
+
         output = ""
         for line in iter(p.stdout.readline, b""):
             output += line.decode()
@@ -213,7 +248,7 @@ def run_cbc(
         p = sub.Popen(command.split(" "), stdout=log_f, stderr=log_f)
         p.wait()
 
-    with open(solution_fn, "r") as f:
+    with open(solution_fn) as f:
         data = f.readline()
 
     if data.startswith("Optimal - objective value"):
@@ -251,17 +286,17 @@ def run_cbc(
 
 
 def run_glpk(
-    model,
-    io_api=None,
-    problem_fn=None,
-    solution_fn=None,
-    log_fn=None,
-    warmstart_fn=None,
-    basis_fn=None,
-    keep_files=False,
-    env=None,
+    model: Model,
+    io_api: str | None = None,
+    problem_fn: Path | None = None,
+    solution_fn: Path | None = None,
+    log_fn: Path | None = None,
+    warmstart_fn: Path | None = None,
+    basis_fn: Path | None = None,
+    keep_files: bool = False,
+    env: None = None,
     **solver_options,
-):
+) -> Result:
     """
     Solve a linear problem using the glpk solver.
 
@@ -280,21 +315,24 @@ def run_glpk(
         "undefined": "infeasible_or_unbounded",
     }
 
-    if io_api is not None and io_api not in ["lp", "mps"]:
+    if io_api is not None and io_api not in FILE_IO_APIS:
         raise ValueError(
             "Keyword argument `io_api` has to be one of `lp`, `mps` or None"
         )
 
     # GLPK does not like the OBJSENSE line in MPS files, which new highspy versions write
-    if io_api == "mps" and model.sense == "max" and sys.version_info >= (3, 12):
+    if io_api == "mps" and model.sense == "max" and _new_highspy_mps_layout:
         raise ValueError(
-            "GLPK does not support maximization in MPS format for Python 3.12+"
+            "GLPK does not support maximization in MPS format highspy versions >=1.7.1"
         )
 
-    problem_fn = model.to_file(problem_fn)
+    problem_fn = model.to_file(problem_fn, io_api)
     suffix = problem_fn.suffix[1:]
 
-    os.makedirs(os.path.dirname(solution_fn), exist_ok=True)
+    if solution_fn is None:
+        raise ValueError("No solution file specified")
+
+    Path(solution_fn).parent.mkdir(exist_ok=True)
 
     # TODO use --nopresol argument for non-optimal solution output
     command = f"glpsol --{suffix} {problem_fn} --output {solution_fn} "
@@ -314,6 +352,12 @@ def run_glpk(
     p = sub.Popen(command.split(" "), stdout=sub.PIPE, stderr=sub.PIPE)
     if log_fn is None:
         output = ""
+
+        if p.stdout is None:
+            raise ValueError(
+                f"Command `{command}` did not run successfully. Check if glpsol is installed and in PATH."
+            )
+
         for line in iter(p.stdout.readline, b""):
             output += line.decode()
         logger.info(output)
@@ -335,8 +379,8 @@ def run_glpk(
                 break
             yield line
 
-    info = io.StringIO("".join(read_until_break(f))[:-2])
-    info = pd.read_csv(info, sep=":", index_col=0, header=None)[1]
+    info_io = io.StringIO("".join(read_until_break(f))[:-2])
+    info = pd.read_csv(info_io, sep=":", index_col=0, header=None)[1]
     condition = info.Status.lower().strip()
     objective = float(re.sub(r"[^0-9\.\+\-e]+", "", info.Objective))
 
@@ -345,8 +389,8 @@ def run_glpk(
     status.legacy_status = condition
 
     def get_solver_solution() -> Solution:
-        dual_ = io.StringIO("".join(read_until_break(f))[:-2])
-        dual_ = pd.read_fwf(dual_)[1:].set_index("Row name")
+        dual_io = io.StringIO("".join(read_until_break(f))[:-2])
+        dual_ = pd.read_fwf(dual_io)[1:].set_index("Row name")
         if "Marginal" in dual_:
             dual = (
                 pd.to_numeric(dual_["Marginal"], "coerce").fillna(0).pipe(set_int_index)
@@ -355,9 +399,9 @@ def run_glpk(
             logger.warning("Dual values of MILP couldn't be parsed")
             dual = pd.Series(dtype=float)
 
-        sol = io.StringIO("".join(read_until_break(f))[:-2])
+        sol_io = io.StringIO("".join(read_until_break(f))[:-2])
         sol = (
-            pd.read_fwf(sol)[1:]
+            pd.read_fwf(sol_io)[1:]
             .set_index("Column name")["Activity"]
             .astype(float)
             .pipe(set_int_index)
@@ -371,17 +415,17 @@ def run_glpk(
 
 
 def run_highs(
-    model,
-    io_api=None,
-    problem_fn=None,
-    solution_fn=None,
-    log_fn=None,
-    warmstart_fn=None,
-    basis_fn=None,
-    keep_files=False,
-    env=None,
+    model: Model,
+    io_api: str | None = None,
+    problem_fn: Path | None = None,
+    solution_fn: Path | None = None,
+    log_fn: Path | None = None,
+    warmstart_fn: Path | None = None,
+    basis_fn: Path | None = None,
+    keep_files: bool = False,
+    env: None = None,
     **solver_options,
-):
+) -> Result:
     """
     Highs solver function. Reads a linear problem file and passes it to the
     highs solver. If the solution is feasible the function returns the
@@ -408,10 +452,7 @@ def run_highs(
     constraints_dual : series
     objective : float
     """
-    CONDITION_MAP = {}
-
-    if warmstart_fn:
-        logger.warning("Warmstart not implemented. Ignoring argument.")
+    CONDITION_MAP: dict[str, str] = {}
 
     if solver_options.get("solver") in ["simplex", "ipm", "pdlp"] and model.type in [
         "QP",
@@ -422,10 +463,10 @@ def run_highs(
             "Drop the solver option or use 'choose' to enable quadratic terms / integrality."
         )
 
-    if io_api is None or io_api in ["lp", "mps"]:
-        model.to_file(problem_fn)
+    if io_api is None or io_api in FILE_IO_APIS:
+        problem_fn = model.to_file(problem_fn, io_api)
         h = highspy.Highs()
-        h.readModel(maybe_convert_path(problem_fn))
+        h.readModel(path_to_string(problem_fn))
     elif io_api == "direct":
         h = model.to_highspy()
     else:
@@ -435,11 +476,16 @@ def run_highs(
 
     if log_fn is None:
         log_fn = model.solver_dir / "highs.log"
-    solver_options["log_file"] = maybe_convert_path(log_fn)
-    logger.info(f"Log file at {solver_options['log_file']}.")
+    solver_options["log_file"] = path_to_string(log_fn)
+    logger.info(f"Log file at {solver_options['log_file']}")
 
     for k, v in solver_options.items():
         h.setOptionValue(k, v)
+
+    if warmstart_fn is not None and warmstart_fn.suffix == ".sol":
+        h.readSolution(path_to_string(warmstart_fn), 0)
+    elif warmstart_fn:
+        h.readBasis(path_to_string(warmstart_fn))
 
     h.run()
 
@@ -447,6 +493,12 @@ def run_highs(
     termination_condition = CONDITION_MAP.get(condition, condition)
     status = Status.from_termination_condition(termination_condition)
     status.legacy_status = condition
+
+    if basis_fn:
+        h.writeBasis(path_to_string(basis_fn))
+
+    if solution_fn:
+        h.writeSolution(path_to_string(solution_fn), 0)
 
     def get_solver_solution() -> Solution:
         objective = h.getObjectiveValue()
@@ -472,17 +524,17 @@ def run_highs(
 
 
 def run_cplex(
-    model,
-    io_api=None,
-    problem_fn=None,
-    solution_fn=None,
-    log_fn=None,
-    warmstart_fn=None,
-    basis_fn=None,
-    keep_files=False,
-    env=None,
+    model: Model,
+    io_api: str | None = None,
+    problem_fn: Path | None = None,
+    solution_fn: Path | None = None,
+    log_fn: Path | None = None,
+    warmstart_fn: Path | None = None,
+    basis_fn: Path | None = None,
+    keep_files: bool = False,
+    env: None = None,
     **solver_options,
-):
+) -> Result:
     """
     Solve a linear problem using the cplex solver.
 
@@ -499,22 +551,16 @@ def run_cplex(
         "integer optimal, tolerance": "optimal",
     }
 
-    if io_api is not None and io_api not in ["lp", "mps"]:
+    if io_api is not None and io_api not in FILE_IO_APIS:
         raise ValueError(
             "Keyword argument `io_api` has to be one of `lp`, `mps` or None"
         )
 
-    model.to_file(problem_fn)
-
+    problem_fn = model.to_file(problem_fn, io_api)
     m = cplex.Cplex()
 
-    problem_fn = maybe_convert_path(problem_fn)
-    log_fn = maybe_convert_path(log_fn)
-    warmstart_fn = maybe_convert_path(warmstart_fn)
-    basis_fn = maybe_convert_path(basis_fn)
-
     if log_fn is not None:
-        log_f = open(log_fn, "w")
+        log_f = open(path_to_string(log_fn), "w")
         m.set_results_stream(log_f)
         m.set_warning_stream(log_f)
         m.set_error_stream(log_f)
@@ -527,15 +573,22 @@ def run_cplex(
                 param = getattr(param, key_layer)
             param.set(value)
 
-    m.read(problem_fn)
+    m.read(path_to_string(problem_fn))
 
-    if warmstart_fn:
-        m.start.read_basis(warmstart_fn)
+    if warmstart_fn is not None:
+        m.start.read_basis(path_to_string(warmstart_fn))
 
     is_lp = m.problem_type[m.get_problem_type()] == "LP"
 
     with contextlib.suppress(cplex.exceptions.errors.CplexSolverError):
         m.solve()
+
+    if solution_fn is not None:
+        try:
+            m.solution.write(path_to_string(solution_fn))
+        except cplex.exceptions.errors.CplexSolverError as err:
+            logger.info("Unable to save solution file. Raised error: %s", err)
+
     condition = m.solution.get_status_string()
     termination_condition = CONDITION_MAP.get(condition, condition)
     status = Status.from_termination_condition(termination_condition)
@@ -547,7 +600,7 @@ def run_cplex(
     def get_solver_solution() -> Solution:
         if basis_fn and is_lp:
             try:
-                m.solution.basis.write(basis_fn)
+                m.solution.basis.write(path_to_string(basis_fn))
             except cplex.exceptions.errors.CplexSolverError:
                 logger.info("No model basis stored")
 
@@ -577,19 +630,19 @@ def run_cplex(
 
 
 def run_gurobi(
-    model,
-    io_api=None,
-    problem_fn=None,
-    solution_fn=None,
-    log_fn=None,
-    warmstart_fn=None,
-    basis_fn=None,
-    model_fn=None,
-    keep_files=False,
-    env=None,
-    return_model=False,
+    model: Model,
+    io_api: str | None = None,
+    problem_fn: Path | None = None,
+    solution_fn: Path | None = None,
+    log_fn: Path | None = None,
+    warmstart_fn: Path | None = None,
+    basis_fn: Path | None = None,
+    model_fn: Path | None = None,
+    keep_files: bool = False,
+    env: gurobipy.Env | None = None,
+    return_model: bool = False,
     **solver_options,
-):
+) -> Result:
     """
     Solve a linear problem using the gurobi solver.
 
@@ -616,26 +669,19 @@ def run_gurobi(
         17: "internal_solver_error",
     }
 
-    log_fn = maybe_convert_path(log_fn)
-    warmstart_fn = maybe_convert_path(warmstart_fn)
-    basis_fn = maybe_convert_path(basis_fn)
-    model_fn = maybe_convert_path(model_fn)
-
     with contextlib.ExitStack() as stack:
         if env is None:
             env = stack.enter_context(gurobipy.Env())
 
-        if io_api is None or io_api in ["lp", "mps"]:
-            problem_fn = model.to_file(problem_fn)
-            problem_fn = maybe_convert_path(problem_fn)
-
+        if io_api is None or io_api in FILE_IO_APIS:
             # Temporarily save model to file and delete variables and
             # constraints from memory.
-            model.to_netcdf(model_fn)
+            model.to_netcdf(path_to_string(model_fn))
             del model._variables
             del model._constraints
-
-            m = gurobipy.read(problem_fn, env=env)
+            
+            problem_fn = model.to_file(problem_fn, io_api=io_api)
+            m = gurobipy.read(path_to_string(problem_fn), env=env)
         elif io_api == "direct":
             problem_fn = None
             m = model.to_gurobipy(env=env)
@@ -648,17 +694,23 @@ def run_gurobi(
             for key, value in solver_options.items():
                 m.setParam(key, value)
         if log_fn is not None:
-            m.setParam("logfile", log_fn)
+            m.setParam("logfile", path_to_string(log_fn))
 
-        if warmstart_fn:
-            m.read(warmstart_fn)
+        if warmstart_fn is not None:
+            m.read(path_to_string(warmstart_fn))
         m.optimize()
 
-        if basis_fn:
+        if basis_fn is not None:
             try:
-                m.write(basis_fn)
+                m.write(path_to_string(basis_fn))
             except gurobipy.GurobiError as err:
                 logger.info("No model basis stored. Raised error: %s", err)
+
+        if solution_fn is not None and solution_fn.suffix == ".sol":
+            try:
+                m.write(path_to_string(solution_fn))
+            except gurobipy.GurobiError as err:
+                logger.info("Unable to save solution file. Raised error: %s", err)
 
         condition = m.status
         termination_condition = CONDITION_MAP.get(condition, condition)
@@ -668,7 +720,7 @@ def run_gurobi(
         def get_solver_solution() -> Solution:
             objective = m.ObjVal
 
-            sol = pd.Series({v.VarName: v.x for v in m.getVars()}, dtype=float)
+            sol = pd.Series({v.VarName: v.x for v in m.getVars()}, dtype=float)  # type: ignore
             sol = set_int_index(sol)
 
             try:
@@ -682,8 +734,8 @@ def run_gurobi(
 
             return Solution(sol, dual, objective)
 
-    solution = safe_get_solution(status, get_solver_solution)
-    maybe_adjust_objective_sign(solution, model.objective.sense, io_api)
+        solution = safe_get_solution(status, get_solver_solution)
+        maybe_adjust_objective_sign(solution, model.objective.sense, io_api)
 
     # After getting the solution, we can delete the gurobi model
     if not return_model:
@@ -703,38 +755,33 @@ def run_gurobi(
 
 
 def run_scip(
-    model,
-    io_api=None,
-    problem_fn=None,
-    solution_fn=None,
-    log_fn=None,
-    warmstart_fn=None,
-    basis_fn=None,
-    keep_files=False,
-    env=None,
+    model: Model,
+    io_api: str | None = None,
+    problem_fn: Path | None = None,
+    solution_fn: Path | None = None,
+    log_fn: Path | None = None,
+    warmstart_fn: Path | None = None,
+    basis_fn: Path | None = None,
+    keep_files: bool = False,
+    env: None = None,
     **solver_options,
-):
+) -> Result:
     """
     Solve a linear problem using the scip solver.
 
     This function communicates with scip using the pyscipopt package.
     """
-    CONDITION_MAP = {}
+    CONDITION_MAP: dict[str, str] = {}
 
-    log_fn = maybe_convert_path(log_fn)
-    warmstart_fn = maybe_convert_path(warmstart_fn)
-    basis_fn = maybe_convert_path(basis_fn)
-
-    if io_api is None or io_api in ["lp", "mps"]:
-        problem_fn = model.to_file(problem_fn)
-        problem_fn = maybe_convert_path(problem_fn)
+    if io_api is None or io_api in FILE_IO_APIS:
+        problem_fn = model.to_file(problem_fn, io_api)
         m = scip.Model()
-        m.readProblem(problem_fn)
+        m.readProblem(path_to_string(problem_fn))
     elif io_api == "direct":
         raise NotImplementedError("Direct API not implemented for SCIP")
     else:
         raise ValueError(
-            "Keyword argument `io_api` has to be one of `lp`, `direct` or None"
+            f"Keyword argument `io_api` has to be one of {IO_APIS} or None"
         )
 
     if solver_options is not None:
@@ -753,7 +800,7 @@ def run_scip(
         m.setParams(solver_options)
 
     if log_fn is not None:
-        m.setLogfile(log_fn)
+        m.setLogfile(path_to_string(log_fn))
 
     if warmstart_fn:
         logger.warning("Warmstart not implemented for SCIP")
@@ -765,6 +812,12 @@ def run_scip(
 
     if basis_fn:
         logger.warning("Basis not implemented for SCIP")
+
+    if solution_fn:
+        try:
+            m.writeSol(m.getBestSol(), filename=path_to_string(solution_fn))
+        except FileNotFoundError as err:
+            logger.warning("Unable to save solution file. Raised error: %s", err)
 
     condition = m.getStatus()
     termination_condition = CONDITION_MAP.get(condition, condition)
@@ -831,36 +884,37 @@ def run_xpress(
         "mip_unbounded": "unbounded",
     }
 
-    if io_api is not None and io_api not in ["lp", "mps"]:
+    if io_api is not None and io_api not in FILE_IO_APIS:
         raise ValueError(
             "Keyword argument `io_api` has to be one of `lp`, `mps` or None"
         )
 
-    problem_fn = model.to_file(problem_fn)
+    problem_fn = model.to_file(problem_fn, io_api)
 
     m = xpress.problem()
 
-    problem_fn = maybe_convert_path(problem_fn)
-    log_fn = maybe_convert_path(log_fn)
-    warmstart_fn = maybe_convert_path(warmstart_fn)
-    basis_fn = maybe_convert_path(basis_fn)
-
-    m.read(problem_fn)
+    m.read(path_to_string(problem_fn))
     m.setControl(solver_options)
 
     if log_fn is not None:
-        m.setlogfile(log_fn)
+        m.setlogfile(path_to_string(log_fn))
 
-    if warmstart_fn:
-        m.readbasis(warmstart_fn)
+    if warmstart_fn is not None:
+        m.readbasis(path_to_string(warmstart_fn))
 
     m.solve()
 
-    if basis_fn:
+    if basis_fn is not None:
         try:
-            m.writebasis(basis_fn)
+            m.writebasis(path_to_string(basis_fn))
         except Exception as err:
             logger.info("No model basis stored. Raised error: %s", err)
+
+    if solution_fn is not None:
+        try:
+            m.tofile(path_to_string(solution_fn), filetype="sol")
+        except Exception as err:
+            logger.info("Unable to save solution file. Raised error: %s", err)
 
     condition = m.getProbStatusString()
     termination_condition = CONDITION_MAP.get(condition, condition)
@@ -876,10 +930,10 @@ def run_xpress(
         sol = set_int_index(sol)
 
         try:
-            dual = [str(d) for d in m.getConstraint()]
-            dual = pd.Series(m.getDual(dual), index=dual, dtype=float)
+            dual_ = [str(d) for d in m.getConstraint()]
+            dual = pd.Series(m.getDual(dual_), index=dual_, dtype=float)
             dual = set_int_index(dual)
-        except xpress.SolverError:
+        except (xpress.SolverError, SystemError):
             logger.warning("Dual values of MILP couldn't be parsed")
             dual = pd.Series(dtype=float)
 
@@ -895,17 +949,17 @@ mosek_bas_re = re.compile(r" (XL|XU)\s+([^ \t]+)\s+([^ \t]+)| (LL|UL|BS)\s+([^ \
 
 
 def run_mosek(
-    model,
-    io_api=None,
-    problem_fn=None,
-    solution_fn=None,
-    log_fn=None,
-    warmstart_fn=None,
-    basis_fn=None,
-    keep_files=False,
-    env=None,
+    model: Model,
+    io_api: str | None = None,
+    problem_fn: Path | None = None,
+    solution_fn: Path | None = None,
+    log_fn: Path | None = None,
+    warmstart_fn: Path | None = None,
+    basis_fn: Path | None = None,
+    keep_files: bool = False,
+    env: mosek.Task | None = None,
     **solver_options,
-):
+) -> Result:
     """
     Solve a linear problem using the MOSEK solver. Both 'direct' mode, mps and
     lp mode are supported; None is interpret as 'direct' mode. MPS mode does
@@ -930,40 +984,35 @@ def run_mosek(
         "solsta.dual_infeas_cer": "infeasible_or_unbounded",
     }
 
-    if io_api is not None and io_api not in ["lp", "mps", "direct"]:
-        raise ValueError(
-            "Keyword argument `io_api` has to be one of `lp`, `mps`, `direct` or None"
-        )
-
-    if io_api != "direct" and io_api is not None:
-        problem_fn = model.to_file(problem_fn)
-        problem_fn = maybe_convert_path(problem_fn)
-    log_fn = maybe_convert_path(log_fn)
-    warmstart_fn = maybe_convert_path(warmstart_fn)
-    basis_fn = maybe_convert_path(basis_fn)
-
     with contextlib.ExitStack() as stack:
         if env is None:
             env = stack.enter_context(mosek.Env())
 
         with env.Task() as m:
-            if io_api is None or io_api == "direct":
+            if io_api == "direct":
                 model.to_mosek(m)
+            elif io_api is None or io_api in FILE_IO_APIS:
+                problem_fn = model.to_file(problem_fn, io_api)
+                m.readdata(path_to_string(problem_fn))
             else:
-                m.readdata(problem_fn)
+                raise ValueError(
+                    "Keyword argument `io_api` has to be one of `lp`, `mps`, `direct` or None"
+                )
 
             for k, v in solver_options.items():
                 m.putparam(k, str(v))
 
             if log_fn is not None:
-                m.linkfiletostream(mosek.streamtype.log, log_fn, 0)
+                m.linkfiletostream(mosek.streamtype.log, path_to_string(log_fn), 0)
+            else:
+                m.set_Stream(mosek.streamtype.log, sys.stdout.write)
 
-            if warmstart_fn:
+            if warmstart_fn is not None:
                 m.putintparam(mosek.iparam.sim_hotstart, mosek.simhotstart.status_keys)
                 skx = [mosek.stakey.low] * m.getnumvar()
                 skc = [mosek.stakey.bas] * m.getnumcon()
 
-                with open(warmstart_fn, "rt") as f:
+                with open(path_to_string(warmstart_fn)) as f:
                     for line in f:
                         if line.startswith("NAME "):
                             break
@@ -977,16 +1026,16 @@ def run_mosek(
                             if o.group(1) is not None:
                                 key = o.group(1)
                                 try:
-                                    skx[
-                                        m.getvarnameindex(o.group(2))
-                                    ] = mosek.stakey.basis
-                                except:
+                                    skx[m.getvarnameindex(o.group(2))] = (
+                                        mosek.stakey.basis
+                                    )
+                                except:  # noqa: E722
                                     pass
                                 try:
                                     skc[m.getvarnameindex(o.group(3))] = (
                                         mosek.stakey.low if key == "XL" else "XU"
                                     )
-                                except:
+                                except:  # noqa: E722
                                     pass
                             else:
                                 key = o.group(4)
@@ -1003,10 +1052,10 @@ def run_mosek(
 
                                 try:
                                     skx[m.getvarnameindex(name)] = stakey
-                                except:
+                                except:  # noqa: E722
                                     try:
                                         skc[m.getvarnameindex(name)] = stakey
-                                    except:
+                                    except:  # noqa: E722
                                         pass
                 m.putskc(mosek.soltype.bas, skc)
                 m.putskx(mosek.soltype.bas, skx)
@@ -1014,9 +1063,9 @@ def run_mosek(
 
             m.solutionsummary(mosek.streamtype.log)
 
-            if basis_fn:
+            if basis_fn is not None:
                 if m.solutiondef(mosek.soltype.bas):
-                    with open(basis_fn, "wt") as f:
+                    with open(path_to_string(basis_fn), "w") as f:
                         f.write(f"NAME {basis_fn}\n")
 
                         skc = [
@@ -1031,7 +1080,6 @@ def run_mosek(
                         skc.reverse()
                         skx.sort()
                         skx.reverse()
-                        numcon = m.getnumcon()
                         while skx and skc and skx[-1][0] == 0 and skc[-1][0] == 0:
                             (_, i, kc) = skc.pop()
                             (_, j, kx) = skx.pop()
@@ -1073,6 +1121,12 @@ def run_mosek(
                         soltype = possible_soltype
                 except mosek.Error:
                     pass
+
+            if solution_fn is not None:
+                try:
+                    m.writesolution(mosek.soltype.bas, path_to_string(solution_fn))
+                except mosek.Error as err:
+                    logger.info("Unable to save solution file. Raised error: %s", err)
 
             condition = str(m.getsolsta(soltype))
             termination_condition = CONDITION_MAP.get(condition, condition)
@@ -1139,41 +1193,42 @@ def run_copt(
         10: "interrupted",
     }
 
-    if io_api is not None and io_api not in ["lp", "mps"]:
+    if io_api is not None and io_api not in FILE_IO_APIS:
         raise ValueError(
             "Keyword argument `io_api` has to be one of `lp`, `mps` or None"
         )
 
-    problem_fn = model.to_file(problem_fn)
-
-    problem_fn = maybe_convert_path(problem_fn)
-    log_fn = maybe_convert_path(log_fn)
-    warmstart_fn = maybe_convert_path(warmstart_fn)
-    basis_fn = maybe_convert_path(basis_fn)
+    problem_fn = model.to_file(problem_fn, io_api)
 
     if env is None:
         env = coptpy.Envr()
 
     m = env.createModel()
 
-    m.read(str(problem_fn))
+    m.read(path_to_string(problem_fn))
 
-    if log_fn:
-        m.setLogFile(log_fn)
+    if log_fn is not None:
+        m.setLogFile(path_to_string(log_fn))
 
     for k, v in solver_options.items():
         m.setParam(k, v)
 
-    if warmstart_fn:
-        m.readBasis(warmstart_fn)
+    if warmstart_fn is not None:
+        m.readBasis(path_to_string(warmstart_fn))
 
     m.solve()
 
     if basis_fn and m.HasBasis:
         try:
-            m.write(basis_fn)
+            m.write(path_to_string(basis_fn))
         except coptpy.CoptError as err:
             logger.info("No model basis stored. Raised error: %s", err)
+
+    if solution_fn:
+        try:
+            m.write(path_to_string(solution_fn))
+        except coptpy.CoptError as err:
+            logger.info("No model solution stored. Raised error: %s", err)
 
     condition = m.LpStatus if model.type in ["LP", "QP"] else m.MipStatus
     termination_condition = CONDITION_MAP.get(condition, condition)
@@ -1204,17 +1259,17 @@ def run_copt(
 
 
 def run_mindopt(
-    model,
-    io_api=None,
-    problem_fn=None,
-    solution_fn=None,
-    log_fn=None,
-    warmstart_fn=None,
-    basis_fn=None,
-    keep_files=False,
-    env=None,
+    model: Model,
+    io_api: str | None = None,
+    problem_fn: Path | None = None,
+    solution_fn: Path | None = None,
+    log_fn: Path | None = None,
+    warmstart_fn: Path | None = None,
+    basis_fn: Path | None = None,
+    keep_files: bool = False,
+    env: mindoptpy.Env | None = None,
     **solver_options,
-):
+) -> Result:
     """
     Solve a linear problem using the MindOpt solver.
 
@@ -1233,7 +1288,7 @@ def run_mindopt(
         5: "suboptimal",
     }
 
-    if io_api is not None and io_api not in ["lp", "mps"]:
+    if io_api is not None and io_api not in FILE_IO_APIS:
         raise ValueError(
             "Keyword argument `io_api` has to be one of `lp`, `mps` or None"
         )
@@ -1242,25 +1297,20 @@ def run_mindopt(
             "MindOpt does not support QP problems in LP format. Use `io_api='mps'` instead."
         )
 
-    problem_fn = model.to_file(problem_fn)
-
-    problem_fn = maybe_convert_path(problem_fn)
-    log_fn = "" if not log_fn else maybe_convert_path(log_fn)
-    warmstart_fn = maybe_convert_path(warmstart_fn)
-    basis_fn = maybe_convert_path(basis_fn)
+    problem_fn = model.to_file(problem_fn, io_api)
 
     if env is None:
-        env = mindoptpy.Env(log_fn)
+        env = mindoptpy.Env(path_to_string(log_fn) if log_fn else "")
     env.start()
 
-    m = mindoptpy.read(problem_fn, env)
+    m = mindoptpy.read(path_to_string(problem_fn), env)
 
     for k, v in solver_options.items():
         m.setParam(k, v)
 
     if warmstart_fn:
         try:
-            m.read(warmstart_fn)
+            m.read(path_to_string(warmstart_fn))
         except mindoptpy.MindoptError as err:
             logger.info("Model basis could not be read. Raised error: %s", err)
 
@@ -1268,9 +1318,15 @@ def run_mindopt(
 
     if basis_fn:
         try:
-            m.write(basis_fn)
+            m.write(path_to_string(basis_fn))
         except mindoptpy.MindoptError as err:
             logger.info("No model basis stored. Raised error: %s", err)
+
+    if solution_fn:
+        try:
+            m.write(path_to_string(solution_fn))
+        except mindoptpy.MindoptError as err:
+            logger.info("No model solution stored. Raised error: %s", err)
 
     condition = m.status
     termination_condition = CONDITION_MAP.get(condition, condition)

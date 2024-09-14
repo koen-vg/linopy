@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
 from scipy.sparse import csc_matrix
 from xarray import DataArray
@@ -173,15 +173,23 @@ def test_quadratic_expression_wrong_multiplication(x, y):
         x * x * y
 
 
+def merge_raise_deprecation_warning(x, y):
+    expr = x * y
+    with pytest.warns(DeprecationWarning):
+        merge(expr, expr)
+
+
 def test_merge_linear_expression_and_quadratic_expression(x, y):
     linexpr = 10 * x + y + 5
     quadexpr = x * y
 
     with pytest.raises(ValueError):
-        expr = merge(linexpr, quadexpr, cls=QuadraticExpression)
+        expr = merge([linexpr, quadexpr], cls=QuadraticExpression)
+        with pytest.warns(DeprecationWarning):
+            expr = merge(linexpr, quadexpr, cls=QuadraticExpression)
 
     linexpr = linexpr.to_quadexpr()
-    expr = merge(linexpr, quadexpr, cls=QuadraticExpression)
+    expr = merge([linexpr, quadexpr], cls=QuadraticExpression)
     assert isinstance(expr, QuadraticExpression)
     assert expr.nterm == 3
     assert expr.const.sum() == 10
@@ -215,6 +223,15 @@ def test_quadratic_expression_flat(x, y):
     assert expr.nterm == 2
     assert (expr.flat.coeffs == 2).all()
     assert len(expr.flat) == 2
+
+
+def test_linear_expression_to_polars(x, y):
+    expr = x * y + x + 5
+    df = expr.to_polars()
+    assert isinstance(df, pl.DataFrame)
+    assert "vars1" in df.columns
+    assert "vars2" in df.columns
+    assert len(df) == expr.nterm * 2
 
 
 def test_quadratic_expression_to_matrix(model, x, y):

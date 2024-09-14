@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Created on Tue Nov  2 22:36:38 2021.
 
@@ -8,11 +7,13 @@ Created on Tue Nov  2 22:36:38 2021.
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
 import xarray as xr
 from xarray.testing import assert_equal
 
 import linopy
+import linopy.variables
 from linopy import Model
 
 
@@ -39,6 +40,17 @@ def test_variable_repr(x):
     x.__repr__()
 
 
+def test_variable_inherited_properties(x):
+    assert isinstance(x.attrs, dict)
+    assert isinstance(x.coords, xr.Coordinates)
+    assert isinstance(x.indexes, xr.core.indexes.Indexes)
+    assert isinstance(x.sizes, xr.core.utils.Frozen)
+    assert isinstance(x.shape, tuple)
+    assert isinstance(x.size, int)
+    assert isinstance(x.dims, tuple)
+    assert isinstance(x.ndim, int)
+
+
 def test_variable_labels(x):
     isinstance(x.labels, xr.DataArray)
 
@@ -48,10 +60,6 @@ def test_variable_data(x):
 
 
 def test_wrong_variable_init(m, x):
-    # without explicit name
-    with pytest.raises(TypeError):
-        linopy.Variable(x.data, m)
-
     # wrong data type
     with pytest.raises(ValueError):
         linopy.Variable(x.labels.values, m, "")
@@ -62,18 +70,34 @@ def test_wrong_variable_init(m, x):
 
 
 def test_variable_getter(x, z):
-    assert isinstance(x[0], linopy.variables.ScalarVariable)
+    with pytest.warns(FutureWarning):
+        assert isinstance(x[0], linopy.variables.ScalarVariable)
+        assert isinstance(z[0], linopy.variables.ScalarVariable)
 
-    assert isinstance(z[0], linopy.variables.ScalarVariable)
+    assert isinstance(x.at[0], linopy.variables.ScalarVariable)
 
+
+def test_variable_getter_slice(x):
+    res = x[:5]
+    assert isinstance(res, linopy.Variable)
+    assert res.size == 5
+
+
+def test_variable_getter_slice_with_step(x):
+    res = x[::2]
+    assert isinstance(res, linopy.Variable)
+    assert res.size == 5
+
+
+def test_variables_getter_list(x):
+    res = x[[1, 2, 3]]
+    assert isinstance(res, linopy.Variable)
+    assert res.size == 3
+
+
+def test_variable_getter_invalid_shape(x):
     with pytest.raises(AssertionError):
-        x[0, 0]
-
-    with pytest.raises(AssertionError):
-        x[:5]
-
-    with pytest.raises(AssertionError):
-        x[[1, 2, 3]]
+        x.at[0, 0]
 
 
 def test_variable_loc(x):
@@ -153,29 +177,49 @@ def test_variable_sum_warn_unknown_kwargs(x):
         x.sum(unknown_kwarg="first")
 
 
+def test_fill_value():
+    isinstance(linopy.variables.Variable._fill_value, dict)
+
+    with pytest.warns(DeprecationWarning):
+        linopy.variables.Variable.fill_value
+
+
 def test_variable_where(x):
     x = x.where([True] * 4 + [False] * 6)
     assert isinstance(x, linopy.variables.Variable)
     assert x.labels[9] == x._fill_value["labels"]
 
-    x = x.where([True] * 4 + [False] * 6, x[0])
+    x = x.where([True] * 4 + [False] * 6, x.at[0])
     assert isinstance(x, linopy.variables.Variable)
-    assert x.labels[9] == x[0].label
+    assert x.labels[9] == x.at[0].label
 
     x = x.where([True] * 4 + [False] * 6, x.loc[0])
     assert isinstance(x, linopy.variables.Variable)
-    assert x.labels[9] == x[0].label
+    assert x.labels[9] == x.at[0].label
 
-
-def test_variable_where_deprecation_warning(x):
-    with pytest.warns(FutureWarning):
-        x.where([True] * 4 + [False] * 6, 1)
+    with pytest.raises(ValueError):
+        x.where([True] * 4 + [False] * 6, 0)
 
 
 def test_variable_shift(x):
     x = x.shift(first=3)
     assert isinstance(x, linopy.variables.Variable)
     assert x.labels[0] == -1
+
+
+def test_variable_swap_dims(x):
+    x = x.assign_coords({"second": ("first", x.indexes["first"] + 100)})
+    x = x.swap_dims({"first": "second"})
+    assert isinstance(x, linopy.variables.Variable)
+    assert x.dims == ("second",)
+
+
+def test_variable_set_index(x):
+    x = x.assign_coords({"second": ("first", x.indexes["first"] + 100)})
+    x = x.set_index({"multi": ["first", "second"]})
+    assert isinstance(x, linopy.variables.Variable)
+    assert x.dims == ("multi",)
+    assert isinstance(x.indexes["multi"], pd.MultiIndex)
 
 
 def test_isnull(x):
@@ -187,10 +231,7 @@ def test_isnull(x):
 def test_variable_fillna(x):
     x = x.where([True] * 4 + [False] * 6)
 
-    with pytest.warns(FutureWarning):
-        x.fillna(0)
-
-    isinstance(x.fillna(x[0]), linopy.variables.Variable)
+    isinstance(x.fillna(x.at[0]), linopy.variables.Variable)
 
 
 def test_variable_bfill(x):
@@ -224,6 +265,18 @@ def test_variable_stack(x):
     result = x.expand_dims("new_dim").stack(new=("new_dim", "first"))
     assert isinstance(result, linopy.variables.Variable)
     assert result.dims == ("new",)
+
+
+def test_variable_flat(x):
+    result = x.flat
+    assert isinstance(result, pd.DataFrame)
+    assert len(result) == x.size
+
+
+def test_variable_polars(x):
+    result = x.to_polars()
+    assert isinstance(result, pl.DataFrame)
+    assert len(result) == x.size
 
 
 def test_variable_sanitize(x):

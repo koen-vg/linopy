@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Created on Thu Mar 18 08:49:08 2021.
 
@@ -8,7 +7,6 @@ Created on Thu Mar 18 08:49:08 2021.
 
 import logging
 import platform
-import sys
 
 import numpy as np
 import pandas as pd
@@ -17,14 +15,17 @@ import xarray as xr
 from xarray.testing import assert_equal
 
 from linopy import GREATER_EQUAL, LESS_EQUAL, Model
-from linopy.solvers import available_solvers, quadratic_solvers
+from linopy.solvers import _new_highspy_mps_layout, available_solvers, quadratic_solvers
 
 logger = logging.getLogger(__name__)
 
-params = [(name, "lp") for name in available_solvers]
-# mps io is only supported via highspy
+io_apis = ["lp", "lp-polars"]
+
 if "highs" in available_solvers:
-    params += [(name, "mps") for name in available_solvers]
+    # mps io is only supported via highspy
+    io_apis.append("mps")
+
+params = [(name, io_api) for name in available_solvers for io_api in io_apis]
 
 if "gurobi" in available_solvers:
     params.append(("gurobi", "direct"))
@@ -336,9 +337,6 @@ def test_default_setting(model, solver, io_api):
     assert np.isclose(model.objective.value, 3.3)
     assert model.solver_name == solver
 
-    with pytest.warns(DeprecationWarning):
-        assert np.isclose(model.objective_value, 3.3)
-
 
 @pytest.mark.parametrize("solver,io_api", params)
 def test_default_setting_sol_and_dual_accessor(model, solver, io_api):
@@ -386,7 +384,7 @@ def test_model_maximization(model_maximization, solver, io_api):
     assert m.objective.sense == "max"
     assert m.objective.value is None
 
-    if solver in ["cbc", "glpk"] and io_api == "mps" and sys.version_info >= (3, 12):
+    if solver in ["cbc", "glpk"] and io_api == "mps" and _new_highspy_mps_layout:
         with pytest.raises(ValueError):
             m.solve(solver, io_api=io_api)
     else:
@@ -409,7 +407,6 @@ def test_solver_options(model, solver, io_api):
         "gurobi": {"TimeLimit": 1},
         "glpk": {"tmlim": 1},
         "cplex": {"timelimit": 1},
-        "scip": {"time_limit": 1},
         "xpress": {"maxtime": 1},
         "highs": {"time_limit": 1},
         "scip": {"limits/time": 1},
@@ -459,12 +456,17 @@ def test_set_files(tmp_path, model, solver, io_api):
 def test_set_files_and_keep_files(tmp_path, model, solver, io_api):
     status, condition = model.solve(
         solver,
+        io_api=io_api,
         problem_fn=tmp_path / "problem.lp",
         solution_fn=tmp_path / "solution.sol",
         log_fn=tmp_path / "logging.log",
         keep_files=True,
     )
     assert status == "ok"
+    if io_api != "direct" and solver != "xpress":
+        assert (tmp_path / "problem.lp").exists()
+        assert (tmp_path / "solution.sol").exists()
+    assert (tmp_path / "logging.log").exists()
 
 
 @pytest.mark.parametrize("solver,io_api", params)
@@ -540,7 +542,10 @@ def test_milp_model_r(milp_model_r, solver, io_api):
         assert ((milp_model_r.solution.x == 11) | (milp_model_r.solution.y == 0)).all()
 
 
-@pytest.mark.parametrize("solver,io_api", [p for p in params if p != ("mindopt", "lp")])
+@pytest.mark.parametrize(
+    "solver,io_api",
+    [p for p in params if p not in [("mindopt", "lp"), ("mindopt", "lp-polars")]],
+)
 def test_quadratic_model(quadratic_model, solver, io_api):
     if solver in feasible_quadratic_solvers:
         status, condition = quadratic_model.solve(solver, io_api=io_api)
@@ -553,7 +558,10 @@ def test_quadratic_model(quadratic_model, solver, io_api):
             quadratic_model.solve(solver, io_api=io_api)
 
 
-@pytest.mark.parametrize("solver,io_api", [p for p in params if p != ("mindopt", "lp")])
+@pytest.mark.parametrize(
+    "solver,io_api",
+    [p for p in params if p not in [("mindopt", "lp"), ("mindopt", "lp-polars")]],
+)
 def test_quadratic_model_cross_terms(quadratic_model_cross_terms, solver, io_api):
     if solver in feasible_quadratic_solvers:
         status, condition = quadratic_model_cross_terms.solve(solver, io_api=io_api)
@@ -566,7 +574,10 @@ def test_quadratic_model_cross_terms(quadratic_model_cross_terms, solver, io_api
             quadratic_model_cross_terms.solve(solver, io_api=io_api)
 
 
-@pytest.mark.parametrize("solver,io_api", [p for p in params if p != ("mindopt", "lp")])
+@pytest.mark.parametrize(
+    "solver,io_api",
+    [p for p in params if p not in [("mindopt", "lp"), ("mindopt", "lp-polars")]],
+)
 def test_quadratic_model_wo_constraint(quadratic_model, solver, io_api):
     quadratic_model.constraints.remove("con0")
     if solver in feasible_quadratic_solvers:
@@ -579,7 +590,10 @@ def test_quadratic_model_wo_constraint(quadratic_model, solver, io_api):
             quadratic_model.solve(solver, io_api=io_api)
 
 
-@pytest.mark.parametrize("solver,io_api", [p for p in params if p != ("mindopt", "lp")])
+@pytest.mark.parametrize(
+    "solver,io_api",
+    [p for p in params if p not in [("mindopt", "lp"), ("mindopt", "lp-polars")]],
+)
 def test_quadratic_model_unbounded(quadratic_model_unbounded, solver, io_api):
     if solver in feasible_quadratic_solvers:
         status, condition = quadratic_model_unbounded.solve(solver, io_api=io_api)
@@ -649,6 +663,22 @@ def test_solver_attribute_getter(model, solver, io_api):
         rc = model.variables.get_solver_attribute("RC")
         assert isinstance(rc, xr.Dataset)
         assert set(rc) == set(model.variables)
+
+
+@pytest.mark.parametrize("solver,io_api", params)
+def test_model_resolve(model, solver, io_api):
+    status, condition = model.solve(solver, io_api=io_api)
+    assert status == "ok"
+    # x = -0.1, y = 1.7
+    assert np.isclose(model.objective.value, 3.3)
+
+    # add another constraint after solve
+    model.add_constraints(model.variables.y >= 3)
+
+    status, condition = model.solve(solver, io_api=io_api)
+    assert status == "ok"
+    # x = -0.75, y = 3.0
+    assert np.isclose(model.objective.value, 5.25)
 
 
 # def init_model_large():

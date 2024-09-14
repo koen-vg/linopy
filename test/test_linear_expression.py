@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Created on Wed Mar 17 17:06:36 2021.
 
@@ -8,6 +7,7 @@ Created on Wed Mar 17 17:06:36 2021.
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
 import xarray as xr
 from xarray.testing import assert_equal
@@ -62,7 +62,6 @@ def test_empty_linexpr(m):
 
 
 def test_linexpr_with_wrong_data(m):
-
     with pytest.raises(ValueError):
         LinearExpression(xr.Dataset({"a": [1]}), m)
 
@@ -143,6 +142,9 @@ def test_repr(m):
 
 def test_fill_value():
     isinstance(LinearExpression._fill_value, dict)
+
+    with pytest.warns(DeprecationWarning):
+        LinearExpression.fill_value
 
 
 def test_linexpr_with_scalars(m):
@@ -264,7 +266,11 @@ def test_linear_expression_with_errors(m, x):
 
 def test_linear_expression_from_rule(m, x, y):
     def bound(m, i):
-        return (i - 1) * x[i - 1] + y[i] + 1 * x[i] if i == 1 else i * x[i] - y[i]
+        return (
+            (i - 1) * x.at[i - 1] + y.at[i] + 1 * x.at[i]
+            if i == 1
+            else i * x.at[i] - y.at[i]
+        )
 
     expr = LinearExpression.from_rule(m, bound, x.coords)
     assert isinstance(expr, LinearExpression)
@@ -276,7 +282,7 @@ def test_linear_expression_from_rule_with_return_none(m, x, y):
     # with return type None
     def bound(m, i):
         if i == 1:
-            return (i - 1) * x[i - 1] + y[i]
+            return (i - 1) * x.at[i - 1] + y.at[i]
 
     expr = LinearExpression.from_rule(m, bound, x.coords)
     assert isinstance(expr, LinearExpression)
@@ -464,6 +470,42 @@ def test_linear_expression_multiplication_invalid(x, y, z):
         expr / x
 
 
+def test_expression_inherited_properties(x, y):
+    expr = 10 * x + y
+    assert isinstance(expr.attrs, dict)
+    assert isinstance(expr.coords, xr.Coordinates)
+    assert isinstance(expr.indexes, xr.core.indexes.Indexes)
+    assert isinstance(expr.sizes, xr.core.utils.Frozen)
+
+
+def test_linear_expression_getitem_single(x, y):
+    expr = 10 * x + y + 3
+    sel = expr[0]
+    assert isinstance(sel, LinearExpression)
+    assert sel.nterm == 2
+    # one expression with two terms (constant is not counted)
+    assert sel.size == 2
+
+
+def test_linear_expression_getitem_slice(x, y):
+    expr = 10 * x + y + 3
+    sel = expr[:1]
+
+    assert isinstance(sel, LinearExpression)
+    assert sel.nterm == 2
+    # one expression with two terms (constant is not counted)
+    assert sel.size == 2
+
+
+def test_linear_expression_getitem_list(x, y, z):
+    expr = 10 * x + z + 10
+    sel = expr[:, [0, 2]]
+    assert isinstance(sel, LinearExpression)
+    assert sel.nterm == 2
+    # four expressions with two terms (constant is not counted)
+    assert sel.size == 8
+
+
 def test_linear_expression_loc(x, y):
     expr = x + y
     assert expr.loc[0].size < expr.loc[:5].size
@@ -474,6 +516,22 @@ def test_linear_expression_isnull(v):
     filter = (expr.coeffs >= 10).any(TERM_DIM)
     expr = expr.where(filter)
     assert expr.isnull().sum() == 10
+
+
+def test_linear_expression_flat(v):
+    coeff = np.arange(1, 21)  # use non-zero coefficients
+    expr = coeff * v
+    df = expr.flat
+    assert isinstance(df, pd.DataFrame)
+    assert (df.coeffs == coeff).all()
+
+
+def test_linear_expression_to_polars(v):
+    coeff = np.arange(1, 21)  # use non-zero coefficients
+    expr = coeff * v
+    df = expr.to_polars()
+    assert isinstance(df, pl.DataFrame)
+    assert (df["coeffs"].to_numpy() == coeff).all()
 
 
 def test_linear_expression_where(v):
@@ -551,6 +609,23 @@ def test_linear_expression_shift(v):
     assert (shifted.vars.loc[:1] == -1).all()
 
 
+def test_linear_expression_swap_dims(v):
+    expr = v.to_linexpr()
+    expr = expr.assign_coords({"second": ("dim_2", expr.indexes["dim_2"] + 100)})
+    expr = expr.swap_dims({"dim_2": "second"})
+    assert isinstance(expr, LinearExpression)
+    assert expr.coord_dims == ("second",)
+
+
+def test_linear_expression_set_index(v):
+    expr = v.to_linexpr()
+    expr = expr.assign_coords({"second": ("dim_2", expr.indexes["dim_2"] + 100)})
+    expr = expr.set_index({"multi": ["dim_2", "second"]})
+    assert isinstance(expr, LinearExpression)
+    assert expr.coord_dims == ("multi",)
+    assert isinstance(expr.indexes["multi"], pd.MultiIndex)
+
+
 def test_linear_expression_fillna(v):
     expr = np.arange(20) * v + 10
     assert expr.const.sum() == 200
@@ -569,7 +644,7 @@ def test_linear_expression_fillna(v):
 def test_variable_expand_dims(v):
     result = v.to_linexpr().expand_dims("new_dim")
     assert isinstance(result, LinearExpression)
-    assert result.coord_dims == ("new_dim", "dim_2")
+    assert result.coord_dims == ("dim_2", "new_dim")
 
 
 def test_variable_stack(v):
@@ -591,6 +666,18 @@ def test_linear_expression_groupby(v, use_fallback):
     assert "group" in grouped.dims
     assert (grouped.data.group == [1, 2]).all()
     assert grouped.nterm == 10
+
+
+@pytest.mark.parametrize("use_fallback", [True])
+def test_linear_expression_groupby_ndim(z, use_fallback):
+    # TODO: implement fallback for n-dim groupby, see https://github.com/PyPSA/linopy/issues/299
+    expr = 1 * z
+    groups = xr.DataArray([[1, 1, 2], [1, 3, 3]], coords=z.coords)
+    grouped = expr.groupby(groups).sum(use_fallback=use_fallback)
+    assert "group" in grouped.dims
+    # there are three groups, 1, 2 and 3, the largest group has 3 elements
+    assert (grouped.data.group == [1, 2, 3]).all()
+    assert grouped.nterm == 3
 
 
 @pytest.mark.parametrize("use_fallback", [True, False])
@@ -732,6 +819,9 @@ def test_linear_expression_rolling(v):
     rolled = expr.rolling(dim_2=3).sum()
     assert rolled.nterm == 3
 
+    with pytest.raises(ValueError):
+        expr.rolling().sum()
+
 
 def test_linear_expression_rolling_with_const(v):
     expr = 1 * v + 15
@@ -761,7 +851,7 @@ def test_merge(x, y, z):
     expr1 = (10 * x + y).sum("dim_0")
     expr2 = z.sum("dim_0")
 
-    res = merge(expr1, expr2)
+    res = merge([expr1, expr2])
     assert res.nterm == 6
 
     res = merge([expr1, expr2])
@@ -771,16 +861,19 @@ def test_merge(x, y, z):
     expr1 = z.sel(dim_0=0).sum("dim_1")
     expr2 = z.sel(dim_0=1).sum("dim_1")
 
-    res = merge(expr1, expr2, dim="dim_1")
+    res = merge([expr1, expr2], dim="dim_1")
     assert res.nterm == 3
 
     # now with different length of terms
     expr1 = z.sel(dim_0=0, dim_1=slice(0, 1)).sum("dim_1")
     expr2 = z.sel(dim_0=1).sum("dim_1")
 
-    res = merge(expr1, expr2, dim="dim_1")
+    res = merge([expr1, expr2], dim="dim_1")
     assert res.nterm == 3
     assert res.sel(dim_1=0).vars[2].item() == -1
+
+    with pytest.warns(DeprecationWarning):
+        merge(expr1, expr2)
 
 
 def test_linear_expression_outer_sum(x, y):
@@ -791,6 +884,8 @@ def test_linear_expression_outer_sum(x, y):
     expr = 1 * x + 2 * y
     expr2 = sum([1 * x, 2 * y])
     assert_linequal(expr, expr2)
+
+    assert isinstance(expr.sum(), LinearExpression)
 
 
 def test_rename(x, y, z):

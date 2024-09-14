@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 This module aims at testing the correct behavior of the Variables class.
 """
@@ -7,6 +6,7 @@ This module aims at testing the correct behavior of the Variables class.
 import numpy as np
 import pandas as pd
 import pytest
+import xarray as xr
 
 import linopy
 from linopy import Model
@@ -26,6 +26,13 @@ def test_variables_repr(m):
     m.variables.__repr__()
 
 
+def test_variables_inherited_properties(m):
+    assert isinstance(m.variables.attrs, dict)
+    assert isinstance(m.variables.coords, xr.Coordinates)
+    assert isinstance(m.variables.indexes, xr.core.indexes.Indexes)
+    assert isinstance(m.variables.sizes, xr.core.utils.Frozen)
+
+
 def test_variables_getattr_formatted():
     m = Model()
     m.add_variables(name="y-0")
@@ -42,10 +49,10 @@ def test_variables_assignment_with_merge():
     """
     m = Model()
 
-    upper = pd.Series(np.ones((10)))
+    upper = pd.Series(np.ones(10))
     var0 = m.add_variables(upper)
 
-    upper = pd.Series(np.ones((12)))
+    upper = pd.Series(np.ones(12))
     var1 = m.add_variables(upper)
 
     with pytest.warns(UserWarning):

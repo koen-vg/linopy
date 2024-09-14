@@ -4,6 +4,46 @@ Release Notes
 Upcoming Version
 ----------------
 
+Version 0.3.14
+--------------
+
+* Ensure compatibility with xarray >= v2024.07.0, which has drop the ``squeeze`` argument from the ``groupby`` function.
+
+Version 0.3.13
+--------------
+
+* Follow-up release to properly fix all deprecations from multiindexed data assignments in xarray datasets.
+* Fix typing relevant import for non-default highs dependency in vanilla installation
+
+Version 0.3.12
+--------------
+
+* Support for warmstart in HiGHS using basis or solution files, including support for writing basis and solution files of a solved model.
+* Linopy now uses mypy for type checking allowing for a more secure and stable code base.
+* The creation of solution files with gurobi, scip and mindopt is now supported.
+
+Version 0.3.11
+--------------
+
+* The writing and reading from netcdf files was fixed to correctly handle the model `parameters` field.
+
+Version 0.3.10
+--------------
+
+* The classes `Variable`, `LinearExpression` and `Constraint` now have a new `getitem` method that allows selecting a subset of the object in the same way as `xarray` objects, i.e. by integer labels or boolean index. Example usage: `x[[1, 2]]` or `x[x.indexes["some_index"] > 5]`.
+
+* The class `Constraint` now has a new method `.loc` to select a subset of the constraint by labels.
+
+* Selecting a single variable with the `getitem` (`[]`) method now raises a `FutureWarning` that the return type will change to `Variable` instead of a `ScalarVariable` in the future. To get a `ScalarVariable` in the future, use the `at[]` method.
+
+* A new module `examples` was added which contains example models. For example, you can call `m = linopy.examples.benchmark_model()`.
+
+* A new memory-efficient and super fast LP file writing method was added which uses the `Polars package <https://github.com/pola-rs/polars>`_. It is still in experimental mode but seems to be very promising. Activate it with the `io_api="lp-polars"` argument in the `solve` function.
+
+
+* The Constraint class now supports the methods `assign`, `assign_attrs`, `assign_coords`, `broadcast_like`, `chunk`, `drop_sel`, `drop_isel`, `expand_dims`, `sel`, `isel`, `shift`, `swap_dims`, `set_index`, `reindex`, `reindex_like`, `rename`, `rename_dims`, `roll`, `stack`. These methods allow to manipulation of a (anonymous) constraint more flexibly.
+
+* The Variable, expressions and Constraint classes now have new methods `swap_dims` and `set_index`. The `swap_dims` method allows to swap the dimensions of the object. The `set_index` method allows to set a new index for the object. Both methods are useful for reshaping the object more flexibly.
 
 Version 0.3.9
 -------------

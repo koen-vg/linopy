@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Created on Tue Nov  2 22:38:48 2021.
 
@@ -8,11 +7,11 @@ Created on Tue Nov  2 22:38:48 2021.
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
 import xarray as xr
 from xarray.testing import assert_equal
 
-import linopy
 from linopy import EQUAL, GREATER_EQUAL, LESS_EQUAL, LinearExpression, Model
 from linopy.constants import (
     HELPER_DIMS,
@@ -22,7 +21,7 @@ from linopy.constants import (
     short_LESS_EQUAL,
     sign_replace_dict,
 )
-from linopy.constraints import Constraint
+from linopy.constraints import Constraint, Constraints
 
 
 @pytest.fixture
@@ -69,7 +68,7 @@ def test_empty_constraints_repr():
 
 def test_constraints_getter(m, c):
     assert c.shape == (10,)
-    assert isinstance(m.constraints[["c"]], linopy.constraints.Constraints)
+    assert isinstance(m.constraints[["c"]], Constraints)
 
 
 def test_anonymous_constraint_from_linear_expression_le(x, y):
@@ -153,12 +152,52 @@ def test_anonymous_constraint_with_expression_on_both_sides(x, y):
 
 
 def test_anonymous_scalar_constraint_with_scalar_variable_on_rhs(x, y):
-    expr = 10 * x[0] + y[1]
+    expr = 10 * x.at[0] + y.at[1]
     with pytest.raises(TypeError):
-        con = expr == x[0]
+        expr == x.at[0]
         # assert isinstance(con.lhs, LinearExpression)
         # assert (con.sign == EQUAL).all()
         # assert (con.rhs == 0).all()
+
+
+def test_constraint_inherited_properties(x, y):
+    con = 10 * x + y <= 10
+    assert isinstance(con.attrs, dict)
+    assert isinstance(con.coords, xr.Coordinates)
+    assert isinstance(con.indexes, xr.core.indexes.Indexes)
+    assert isinstance(con.sizes, xr.core.utils.Frozen)
+    assert isinstance(con.ndim, int)
+    assert isinstance(con.nterm, int)
+    assert isinstance(con.shape, tuple)
+    assert isinstance(con.size, int)
+    assert isinstance(con.dims, xr.core.utils.Frozen)
+    with pytest.warns(DeprecationWarning):
+        assert con.values is None
+
+
+def test_constraint_wrapped_methods(x, y):
+    con = 10 * x + y <= 10
+
+    # Test wrapped methods
+    con.assign({"new_var": xr.DataArray(np.zeros((2, 2)), coords=[range(2), range(2)])})
+    con.assign_attrs({"new_attr": "value"})
+    con.assign_coords(
+        {"new_coord": xr.DataArray(np.zeros((2, 2)), coords=[range(2), range(2)])}
+    )
+    # con.bfill(dim="first")
+    con.broadcast_like(con.data)
+    con.chunk()
+    con.drop_sel({"first": 0})
+    con.drop_isel({"first": 0})
+    con.expand_dims("new_dim")
+    # con.ffill(dim="first")
+    con.shift({"first": 1})
+    con.reindex({"first": [0, 1]})
+    con.reindex_like(con.data)
+    con.rename({"first": "new_labels"})
+    con.rename_dims({"first": "new_labels"})
+    con.roll({"first": 1})
+    con.stack(new_dim=("first", "second"))
 
 
 def test_anonymous_constraint_sel(x, y):
@@ -167,9 +206,43 @@ def test_anonymous_constraint_sel(x, y):
     assert isinstance(con.sel(first=[1, 2]), Constraint)
 
 
+def test_anonymous_constraint_swap_dims(x, y):
+    expr = 10 * x + y
+    con = expr <= 10
+    con = con.assign_coords({"third": ("second", con.indexes["second"] + 100)})
+    con = con.swap_dims({"second": "third"})
+    assert isinstance(con, Constraint)
+    assert con.coord_dims == ("first", "third")
+
+
+def test_anonymous_constraint_set_index(x, y):
+    expr = 10 * x + y
+    con = expr <= 10
+    con = con.assign_coords({"third": ("second", con.indexes["second"] + 100)})
+    con = con.set_index({"multi": ["second", "third"]})
+    assert isinstance(con, Constraint)
+    assert con.coord_dims == (
+        "first",
+        "multi",
+    )
+    assert isinstance(con.indexes["multi"], pd.MultiIndex)
+
+
+def test_anonymous_constraint_loc(x, y):
+    expr = 10 * x + y
+    con = expr <= 10
+    assert isinstance(con.loc[[1, 2]], Constraint)
+
+
+def test_anonymous_constraint_getitem(x, y):
+    expr = 10 * x + y
+    con = expr <= 10
+    assert isinstance(con[1], Constraint)
+
+
 def test_constraint_from_rule(m, x, y):
     def bound(m, i, j):
-        return (i - 1) * x[i - 1] + y[j] >= 0 if i % 2 else i * x[i] >= 0
+        return (i - 1) * x.at[i - 1] + y.at[j] >= 0 if i % 2 else i * x.at[i] >= 0
 
     coords = [x.coords["first"], y.coords["second"]]
     con = Constraint.from_rule(m, bound, coords)
@@ -181,7 +254,7 @@ def test_constraint_from_rule(m, x, y):
 def test_constraint_from_rule_with_none_return(m, x, y):
     def bound(m, i, j):
         if i % 2:
-            return i * x[i] + y[j] >= 0
+            return i * x.at[i] + y.at[j] >= 0
 
     coords = [x.coords["first"], y.coords["second"]]
     con = Constraint.from_rule(m, bound, coords)
@@ -299,12 +372,16 @@ def test_constraint_labels_setter_invalid(c):
 
 
 def test_constraint_sel(c):
-    assert isinstance(c.sel(first=[1, 2]), linopy.constraints.Constraint)
-    assert isinstance(c.isel(first=[1, 2]), linopy.constraints.Constraint)
+    assert isinstance(c.sel(first=[1, 2]), Constraint)
+    assert isinstance(c.isel(first=[1, 2]), Constraint)
 
 
 def test_constraint_flat(c):
     assert isinstance(c.flat, pd.DataFrame)
+
+
+def test_constraint_to_polars(c):
+    assert isinstance(c.to_polars(), pl.DataFrame)
 
 
 def test_constraint_assignment_with_anonymous_constraints(m, x, y):
@@ -357,6 +434,45 @@ def test_constraint_assignment_with_args_alternative_sign(m, x, y):
         assert m.constraints[f"c{i}"].coeffs.notnull().all()
         assert (m.constraints[f"c{i}"].sign == sign_replace_dict[sign]).all()
         assert (m.constraints[f"c{i}"].rhs == 0).all()
+
+
+def test_constraint_assignment_assert_sign_rhs_not_none(m, x, y):
+    lhs = x + y
+    with pytest.raises(ValueError):
+        m.add_constraints(lhs, EQUAL, None)
+
+
+def test_constraint_assignment_callable_assert_sign_rhs_not_none(m, x, y):
+    def lhs(x):
+        return None
+
+    coords = [x.coords["first"], y.coords["second"]]
+    with pytest.raises(ValueError):
+        m.add_constraints(lhs, EQUAL, None, coords=coords)
+
+
+def test_constraint_assignment_tuple_assert_sign_rhs_not_none(m, x, y):
+    lhs = [(1, x), (2, y)]
+    with pytest.raises(ValueError):
+        m.add_constraints(lhs, EQUAL, None)
+
+
+def test_constraint_assignment_assert_sign_rhs_none(m, x, y):
+    con = x + y >= 0
+    with pytest.raises(ValueError):
+        m.add_constraints(con, EQUAL, None)
+
+    with pytest.raises(ValueError):
+        m.add_constraints(con, None, 0)
+
+
+def test_constraint_assignment_scalar_constraints_assert_sign_rhs_none(m, x, y):
+    con = x.at[0] + y.at[1] >= 0
+    with pytest.raises(ValueError):
+        m.add_constraints(con, EQUAL, None)
+
+    with pytest.raises(ValueError):
+        m.add_constraints(con, None, 0)
 
 
 def test_constraint_assignment_with_args_invalid_sign(m, x, y):
@@ -462,8 +578,8 @@ def test_get_name_by_label():
 
 
 def test_constraints_inequalities(m):
-    assert isinstance(m.constraints.inequalities, linopy.constraints.Constraints)
+    assert isinstance(m.constraints.inequalities, Constraints)
 
 
 def test_constraints_equalities(m):
-    assert isinstance(m.constraints.equalities, linopy.constraints.Constraints)
+    assert isinstance(m.constraints.equalities, Constraints)

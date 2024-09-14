@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Linopy common module.
 
 This module contains commonly used functions.
 """
 
-from functools import wraps
-from typing import Any, Dict, List, Optional, Union
+import operator
+import os
+from collections.abc import Hashable, Iterable, Mapping, Sequence
+from functools import reduce, wraps
+from pathlib import Path
+from typing import Any, Callable, Union, overload
 from warnings import warn
 
 import numpy as np
 import pandas as pd
+import polars as pl
 from numpy import arange
 from xarray import DataArray, Dataset, align, apply_ufunc, broadcast
-from xarray.core import indexing, utils
+from xarray.core import indexing
+from xarray.namedarray.utils import is_dict_like
 
 from linopy.config import options
 from linopy.constants import (
@@ -26,17 +31,20 @@ from linopy.constants import (
 )
 
 
-def maybe_replace_sign(sign):
+def maybe_replace_sign(sign: str) -> str:
     """
     Replace the sign with an alternative sign if available.
 
-    Parameters:
+    Parameters
+    ----------
         sign (str): The sign to be replaced.
 
-    Returns:
+    Returns
+    -------
         str: The replaced sign.
 
-    Raises:
+    Raises
+    ------
         ValueError: If the sign is not in the available signs.
     """
     if sign in SIGNS_alternative:
@@ -47,34 +55,38 @@ def maybe_replace_sign(sign):
         raise ValueError(f"Sign {sign} not in {SIGNS} or {SIGNS_alternative}")
 
 
-def maybe_replace_signs(sign):
+def maybe_replace_signs(sign: DataArray) -> DataArray:
     """
     Replace signs with alternative signs if available.
 
-    Parameters:
+    Parameters
+    ----------
         sign (np.ndarray): The signs to be replaced.
 
-    Returns:
+    Returns
+    -------
         np.ndarray: The replaced signs.
     """
     func = np.vectorize(maybe_replace_sign)
     return apply_ufunc(func, sign, dask="parallelized", output_dtypes=[sign.dtype])
 
 
-def format_string_as_variable_name(name):
+def format_string_as_variable_name(name: Hashable):
     """
     Format a string to a valid python variable name.
 
-    Parameters:
+    Parameters
+    ----------
         name (str): The name to be converted.
 
-    Returns:
+    Returns
+    -------
         str: The formatted name.
     """
-    return name.replace(" ", "_").replace("-", "_")
+    return str(name).replace(" ", "_").replace("-", "_")
 
 
-def get_from_list(lst: Optional[list], index: int):
+def get_from_iterable(lst: Union[str, Iterable[Hashable], None], index: int):
     """
     Returns the element at the specified index of the list, or None if the index
     is out of bounds.
@@ -88,8 +100,8 @@ def get_from_list(lst: Optional[list], index: int):
 
 def pandas_to_dataarray(
     arr: Union[pd.DataFrame, pd.Series],
-    coords: Optional[Union[dict, list]] = None,
-    dims: Optional[list] = None,
+    coords: Union[Sequence[Union[Sequence, pd.Index, DataArray]], Mapping, None] = None,
+    dims: Union[Iterable[Hashable], None] = None,
     **kwargs,
 ) -> DataArray:
     """
@@ -99,27 +111,29 @@ def pandas_to_dataarray(
     coordinates (index, columns) will be used as coordinates for the DataArray.
     Solely the dimension names can be specified.
 
-    Parameters:
+    Parameters
+    ----------
         arr (Union[pd.DataFrame, pd.Series]):
             The input pandas DataFrame or Series.
-        coords (Optional[Union[dict, list]]):
+        coords (Union[dict, list, None]):
             The coordinates for the DataArray. If None, default coordinates will be used.
-        dims (Optional[list]):
+        dims (Union[list, None]):
             The dimensions for the DataArray. If None, the column names of the DataFrame or the index names of the Series will be used.
         **kwargs:
             Additional keyword arguments to be passed to the DataArray constructor.
 
-    Returns:
+    Returns
+    -------
         DataArray:
             The converted DataArray.
     """
     dims = [
-        axis.name or get_from_list(dims, i) or f"dim_{i}"
+        axis.name or get_from_iterable(dims, i) or f"dim_{i}"
         for i, axis in enumerate(arr.axes)
     ]
     if coords is not None:
         pandas_coords = dict(zip(dims, arr.axes))
-        if isinstance(coords, (list, tuple)):
+        if isinstance(coords, Sequence):
             coords = dict(zip(dims, coords))
         shared_dims = set(pandas_coords.keys()) & set(coords.keys())
         non_aligned = []
@@ -142,35 +156,38 @@ def pandas_to_dataarray(
 
 def numpy_to_dataarray(
     arr: np.ndarray,
-    coords: Optional[Union[dict, list]] = None,
-    dims: Optional[list] = None,
+    coords: Union[Sequence[Union[Sequence, pd.Index, DataArray]], Mapping, None] = None,
+    dims: Union[str, Iterable[Hashable], None] = None,
     **kwargs,
 ) -> DataArray:
     """
     Convert a numpy array to a DataArray.
 
-    Parameters:
+    Parameters
+    ----------
         arr (np.ndarray):
             The input numpy array.
-        coords (Optional[Union[dict, list]]):
+        coords (Union[dict, list, None]):
             The coordinates for the DataArray. If None, default coordinates will be used.
-        dims (Optional[list]):
+        dims (Union[list, None]):
             The dimensions for the DataArray. If None, the dimensions will be automatically generated.
         **kwargs:
             Additional keyword arguments to be passed to the DataArray constructor.
 
-    Returns:
+    Returns
+    -------
         DataArray:
             The converted DataArray.
     """
     ndim = max(arr.ndim, 0 if coords is None else len(coords))
+    if isinstance(dims, str):
+        dims = [dims]
 
-    dims_given = dims is not None and len(dims)
-    if dims_given:
+    if dims is not None and len(list(dims)):
         # fill up dims with default names to match the number of dimensions
-        dims = [get_from_list(dims, i) or f"dim_{i}" for i in range(ndim)]
+        dims = [get_from_iterable(dims, i) or f"dim_{i}" for i in range(ndim)]
 
-    if isinstance(coords, list) and dims_given:
+    if isinstance(coords, list) and dims is not None and len(list(dims)):
         coords = dict(zip(dims, coords))
 
     return DataArray(arr, coords=coords, dims=dims, **kwargs)
@@ -178,24 +195,26 @@ def numpy_to_dataarray(
 
 def as_dataarray(
     arr,
-    coords: Optional[Union[dict, list]] = None,
-    dims: Optional[list] = None,
+    coords: Union[Sequence[Union[Sequence, pd.Index, DataArray]], Mapping, None] = None,
+    dims: Union[str, Iterable[Hashable], None] = None,
     **kwargs,
 ) -> DataArray:
     """
     Convert an object to a DataArray.
 
-    Parameters:
+    Parameters
+    ----------
         arr:
             The input object.
-        coords (Optional[Union[dict, list]]):
+        coords (Union[dict, list, None]):
             The coordinates for the DataArray. If None, default coordinates will be used.
-        dims (Optional[list]):
+        dims (Union[list, None]):
             The dimensions for the DataArray. If None, the dimensions will be automatically generated.
         **kwargs:
             Additional keyword arguments to be passed to the DataArray constructor.
 
-    Returns:
+    Returns
+    -------
         DataArray:
             The converted DataArray.
     """
@@ -226,7 +245,8 @@ def as_dataarray(
     return arr
 
 
-def to_dataframe(ds, mask_func=None):
+# TODO: rename to to_pandas_dataframe
+def to_dataframe(ds: Dataset, mask_func: Union[Callable, None] = None):
     """
     Convert an xarray Dataset to a pandas DataFrame.
 
@@ -239,17 +259,138 @@ def to_dataframe(ds, mask_func=None):
         Dataset to convert to a DataFrame.
     """
     data = broadcast(ds)[0]
-    data = {k: np.ravel(v) for k, v in data.items()}
+    datadict = {k: v.values.reshape(-1) for k, v in data.items()}
 
     if mask_func is not None:
-        mask = mask_func(data)
-        for k, v in data.items():
-            data[k] = v[mask]
+        mask = mask_func(datadict)
+        for k, v in datadict.items():
+            datadict[k] = v[mask]
 
-    return pd.DataFrame(data, copy=False)
+    return pd.DataFrame(datadict, copy=False)
 
 
-def save_join(*dataarrays, integer_dtype=False):
+def check_has_nulls(df: pd.DataFrame, name: str):
+    any_nan = df.isna().any()
+    if any_nan.any():
+        fields = ", ".join(df.columns[any_nan].to_list())
+        raise ValueError(f"Fields {name} contains nan's in field(s) {fields}")
+
+
+def infer_schema_polars(ds: Dataset) -> dict[Hashable, pl.DataType]:
+    """
+    Infer the polars data schema from a xarray dataset.
+
+    Args:
+    ----
+        ds (polars.DataFrame): The Polars DataFrame for which to infer the schema.
+
+    Returns:
+    -------
+        dict: A dictionary mapping column names to their corresponding Polars data types.
+    """
+    schema = {}
+    for name, array in ds.items():
+        if np.issubdtype(array.dtype, np.integer):
+            schema[name] = pl.Int32 if os.name == "nt" else pl.Int64
+        elif np.issubdtype(array.dtype, np.floating):
+            schema[name] = pl.Float64  # type: ignore
+        elif np.issubdtype(array.dtype, np.bool_):
+            schema[name] = pl.Boolean  # type: ignore
+        elif np.issubdtype(array.dtype, np.object_):
+            schema[name] = pl.Object  # type: ignore
+        else:
+            schema[name] = pl.Utf8  # type: ignore
+    return schema  # type: ignore
+
+
+def to_polars(ds: Dataset, **kwargs) -> pl.DataFrame:
+    """
+    Convert an xarray Dataset to a polars DataFrame.
+
+    This is an memory efficient alternative implementation
+    of `to_dataframe`.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Dataset to convert to a DataFrame.
+    kwargs : dict
+        Additional keyword arguments to be passed to the
+        DataFrame constructor.
+    """
+    data = broadcast(ds)[0]
+    return pl.DataFrame({k: v.values.reshape(-1) for k, v in data.items()}, **kwargs)
+
+
+def check_has_nulls_polars(df: pl.DataFrame, name: str = "") -> None:
+    """
+    Checks if the given DataFrame contains any null values and raises a ValueError if it does.
+
+    Args:
+    ----
+        df (pl.DataFrame): The DataFrame to check for null values.
+        name (str): The name of the data container being checked.
+
+    Raises:
+    ------
+        ValueError: If the DataFrame contains null values,
+        a ValueError is raised with a message indicating the name of the constraint and the fields containing null values.
+    """
+    has_nulls = df.select(pl.col("*").is_null().any())
+    null_columns = [col for col in has_nulls.columns if has_nulls[col][0]]
+    if null_columns:
+        raise ValueError(f"{name} contains nan's in field(s) {null_columns}")
+
+
+def filter_nulls_polars(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Filter out rows containing "empty" values from a polars DataFrame.
+
+    Args:
+    ----
+        df (pl.DataFrame): The DataFrame to filter.
+
+    Returns:
+    -------
+        pl.DataFrame: The filtered DataFrame.
+    """
+    cond = []
+    varcols = [c for c in df.columns if c.startswith("vars")]
+    if varcols:
+        cond.append(reduce(operator.or_, [pl.col(c).ne(-1) for c in varcols]))
+    if "coeffs" in df.columns:
+        cond.append(pl.col("coeffs").ne(0))
+    if "labels" in df.columns:
+        cond.append(pl.col("labels").ne(-1))
+
+    cond = reduce(operator.and_, cond)  # type: ignore
+    return df.filter(cond)
+
+
+def group_terms_polars(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Groups terms in a polars DataFrame.
+
+    Args:
+    ----
+        df (pl.DataFrame): The input DataFrame containing the terms.
+
+    Returns:
+    -------
+        pl.DataFrame: The DataFrame with grouped terms.
+
+    """
+    varcols = [c for c in df.columns if c.startswith("vars")]
+    agg_list = [pl.col("coeffs").sum().alias("coeffs")]
+    for col in set(df.columns) - set(["coeffs", "labels", *varcols]):
+        agg_list.append(pl.col(col).first().alias(col))
+
+    by = [c for c in ["labels"] + varcols if c in df.columns]
+    df = df.group_by(by, maintain_order=True).agg(agg_list)
+    return df
+
+
+def save_join(*dataarrays: DataArray, integer_dtype: bool = False):
     """
     Join multiple xarray Dataarray's to a Dataset and warn if coordinates are not equal.
     """
@@ -262,11 +403,43 @@ def save_join(*dataarrays, integer_dtype=False):
         )
         arrs = align(*dataarrays, join="outer")
         if integer_dtype:
-            arrs = [ds.fillna(-1).astype(int) for ds in arrs]
+            arrs = tuple([ds.fillna(-1).astype(int) for ds in arrs])
     return Dataset({ds.name: ds for ds in arrs})
 
 
-def fill_missing_coords(ds, fill_helper_dims=False):
+def assign_multiindex_safe(ds: Dataset, **fields: Any) -> Dataset:
+    """
+    Assign a field to a xarray Dataset while being safe against warnings about multiindex corruption.
+
+    See https://github.com/PyPSA/linopy/issues/303 for more information
+
+    Parameters
+    ----------
+    ds : Dataset
+        Dataset to assign the field to
+    keys : Union[str, List[str]]
+        Keys of the fields
+    to_assign : Union[List[DataArray], DataArray, Dataset]
+        New values added to the dataset
+
+    Returns
+    -------
+    Dataset
+        Merged dataset with the new field added
+    """
+    remainders = list(set(ds) - set(fields))
+    return Dataset({**ds[remainders], **fields}, attrs=ds.attrs)
+
+
+@overload
+def fill_missing_coords(ds: DataArray, fill_helper_dims: bool = False) -> DataArray: ...
+
+
+@overload
+def fill_missing_coords(ds: Dataset, fill_helper_dims: bool = False) -> Dataset: ...
+
+
+def fill_missing_coords(ds, fill_helper_dims: bool = False):
     """
     Fill coordinates of a xarray Dataset or DataArray with integer coordinates.
 
@@ -311,13 +484,21 @@ def replace_by_map(ds, mapping):
     )
 
 
-def best_int(max_value):
+def to_path(path: Union[str, Path, None]) -> Union[Path, None]:
+    """
+    Convert a string to a Path object.
+    """
+    return Path(path) if path is not None else None
+
+
+def best_int(max_value: int) -> type:
     """
     Get the minimal int dtype for storing values <= max_value.
     """
     for t in (np.int8, np.int16, np.int32, np.int64):
         if max_value <= np.iinfo(t).max:
             return t
+    raise ValueError(f"Value {max_value} is too large for int64.")
 
 
 def get_index_map(*arrays):
@@ -345,7 +526,7 @@ def generate_indices_for_printout(dim_sizes, max_lines):
             yield tuple(np.unravel_index(i, dim_sizes))
 
 
-def align_lines_by_delimiter(lines, delimiter):
+def align_lines_by_delimiter(lines: list[str], delimiter: Union[str, list[str]]):
     # Determine the maximum position of the delimiter
     if isinstance(delimiter, str):
         delimiter = [delimiter]
@@ -366,12 +547,18 @@ def align_lines_by_delimiter(lines, delimiter):
     return formatted_lines
 
 
-def get_label_position(obj, values):
+def get_label_position(
+    obj, values: Union[int, np.ndarray]
+) -> Union[
+    Union[tuple[str, dict], tuple[None, None]],
+    list[Union[tuple[str, dict], tuple[None, None]]],
+    list[list[Union[tuple[str, dict], tuple[None, None]]]],
+]:
     """
     Get tuple of name and coordinate for variable labels.
     """
 
-    def find_single(value):
+    def find_single(value: int) -> Union[tuple[str, dict], tuple[None, None]]:
         if value == -1:
             return None, None
         for name, val in obj.items():
@@ -385,13 +572,17 @@ def get_label_position(obj, values):
                 coord = {
                     dim: labels.indexes[dim][i] for dim, i in zip(labels.dims, index)
                 }
-
                 # Add the name of the DataArray and the coordinates to the result list
                 return name, coord
+        raise ValueError(f"Label {value} is not existent in the model.")
 
-    ndim = np.array(values).ndim
-    if ndim == 0:
+    if isinstance(values, int):
         return find_single(values)
+
+    values = np.array(values)
+    ndim = values.ndim
+    if ndim == 0:
+        return find_single(values.item())
     elif ndim == 1:
         return [find_single(v) for v in values]
     elif ndim == 2:
@@ -545,7 +736,7 @@ def is_constant(func):
                 expressions.LinearExpression,
             ),
         ):
-            raise TypeError(f"Assigned rhs must be a constant, got {type()}).")
+            raise TypeError(f"Assigned rhs must be a constant, got {type(arg)}).")
         return func(self, arg)
 
     return wrapper
@@ -569,7 +760,7 @@ def forward_as_properties(**routes):
     return deco
 
 
-def check_common_keys_values(list_of_dicts: List[Dict[str, Any]]) -> bool:
+def check_common_keys_values(list_of_dicts: list[dict[str, Any]]) -> bool:
     """
     Check if all common keys among a list of dictionaries have the same value.
 
@@ -594,7 +785,7 @@ class LocIndexer:
         self.object = obj
 
     def __getitem__(self, key) -> Dataset:
-        if not utils.is_dict_like(key):
+        if not is_dict_like(key):
             # expand the indexer so we can handle Ellipsis
             labels = indexing.expanded_indexer(key, self.object.ndim)
             key = dict(zip(self.object.dims, labels))
