@@ -938,7 +938,7 @@ class Model:
         ) as f:
             return Path(f.name)
 
-    def get_model_file(self, model_fn=None):
+    def get_model_file(self, model_fn: str | Path | None = None):
         """
         Get a fresh created model file if model file is None.
         """

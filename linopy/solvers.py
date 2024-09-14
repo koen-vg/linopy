@@ -158,14 +158,6 @@ def maybe_adjust_objective_sign(
         solution.objective *= -1
 
 
-def set_int_index(series: Series) -> Series:
-    """
-    Convert string index to int index.
-    """
-    series.index = series.index.str[1:].astype(int)
-    return series
-
-
 def path_to_string(path: Path) -> str:
     """
     Convert a pathlib.Path to a string.

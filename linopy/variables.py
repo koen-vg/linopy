@@ -51,7 +51,6 @@ from linopy.common import (
 )
 from linopy.config import options
 from linopy.constants import TERM_DIM
-from linopy.solvers import set_int_index
 from linopy.types import NotImplementedType
 
 if TYPE_CHECKING:
