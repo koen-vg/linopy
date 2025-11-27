@@ -1,42 +1,18 @@
 .. _fixed-duals:
 
-Fixed Duals for Mixed-Integer Programs
-=======================================
+Duals for Mixed-Integer Programs by Fixing Integer Variables
+========================================================================
 
-Dual values (shadow prices) are normally only available for continuous linear programs. For mixed-integer programs (MIPs), duals are not well-defined due to the discrete nature of integer variables. However, linopy supports computing approximate dual values for MIPs through a technique called **fixed duals**.
+Dual values (shadow prices) are only well-defined for continuous linear programs. For mixed-integer programs (MIPs), duals are not well-defined due to the discrete nature of integer variables. However, you can still get information on dual values "around the optimum" by fixing all integer variables to their optimal values and considering the dual values of the resulting LP.
 
-.. contents::
-   :local:
-   :depth: 2
-
-Overview
---------
-
-Fixed duals provide sensitivity information for mixed-integer programs by:
+Specifically, linopy has built-in support for the following:
 
 1. Solving the MIP to optimality
 2. Fixing all integer variables to their optimal values
 3. Resolving the resulting continuous LP
 4. Extracting dual values from the fixed LP
 
-This approach is particularly useful for:
-
-- Understanding constraint sensitivity at a specific integer solution
-- Post-optimality analysis of MIP models
-- Approximating marginal costs in production planning with discrete decisions
-- Sensitivity analysis in facility location and network design problems
-
 **Important limitation:** Fixed duals represent sensitivity only at the specific integer solution found. They do not capture the general MIP sensitivity, which would require analyzing the entire branch-and-bound tree.
-
-Solver Support
---------------
-
-Fixed duals are currently supported by:
-
-- **Gurobi**: Uses the ``Model.fixed()`` method
-- **Highs**: Uses the ``Highs.getFixedLp()`` method
-
-Other solvers may be added in future versions.
 
 Basic Usage
 -----------
@@ -64,3 +40,13 @@ To compute fixed duals for a MIP model, pass ``calculate_fixed_duals=True`` to t
     print(m.dual)
 
 Without ``calculate_fixed_duals=True``, the ``m.dual`` attribute would be empty or undefined for MIP models.
+
+Solver Support
+--------------
+
+Fixed duals are currently supported by:
+
+- **Gurobi**: Uses the ``Model.fixed()`` method
+- **Highs**: Uses the ``Highs.getFixedLp()`` method
+
+Other solvers may be added in future versions.
