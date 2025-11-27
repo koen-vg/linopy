@@ -114,6 +114,7 @@ This package is published under MIT license.
    coordinate-alignment
    sos-constraints
    piecewise-linear-constraints
+   fixed-duals
    manipulating-models
    testing-framework
    transport-tutorial

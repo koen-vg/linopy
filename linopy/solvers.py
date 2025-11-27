@@ -347,6 +347,7 @@ class Solver(ABC, Generic[EnvType]):
         env: EnvType | None = None,
         explicit_coordinate_names: bool = False,
         set_names: bool = True,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         """
         Abstract method to solve a linear problem from a model.
@@ -366,6 +367,7 @@ class Solver(ABC, Generic[EnvType]):
         warmstart_fn: Path | None = None,
         basis_fn: Path | None = None,
         env: EnvType | None = None,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         """
         Abstract method to solve a linear problem from a problem file.
@@ -386,6 +388,7 @@ class Solver(ABC, Generic[EnvType]):
         basis_fn: Path | None = None,
         env: EnvType | None = None,
         explicit_coordinate_names: bool = False,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         """
         Solve a linear problem either from a model or a problem file.
@@ -406,6 +409,7 @@ class Solver(ABC, Generic[EnvType]):
                 basis_fn=basis_fn,
                 env=env,
                 explicit_coordinate_names=explicit_coordinate_names,
+                calculate_fixed_duals=calculate_fixed_duals,
             )
         elif problem_fn is not None:
             return self.solve_problem_from_file(
@@ -415,6 +419,7 @@ class Solver(ABC, Generic[EnvType]):
                 warmstart_fn=warmstart_fn,
                 basis_fn=basis_fn,
                 env=env,
+                calculate_fixed_duals=calculate_fixed_duals,
             )
         else:
             msg = "No problem file or model specified."
@@ -451,6 +456,7 @@ class CBC(Solver[None]):
         env: None = None,
         explicit_coordinate_names: bool = False,
         set_names: bool = True,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         msg = "Direct API not implemented for CBC"
         raise NotImplementedError(msg)
@@ -463,6 +469,7 @@ class CBC(Solver[None]):
         warmstart_fn: Path | None = None,
         basis_fn: Path | None = None,
         env: None = None,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         """
         Solve a linear problem from a problem file using the CBC solver.
@@ -638,6 +645,7 @@ class GLPK(Solver[None]):
         env: None = None,
         explicit_coordinate_names: bool = False,
         set_names: bool = True,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         msg = "Direct API not implemented for GLPK"
         raise NotImplementedError(msg)
@@ -650,6 +658,7 @@ class GLPK(Solver[None]):
         warmstart_fn: Path | None = None,
         basis_fn: Path | None = None,
         env: None = None,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         """
         Solve a linear problem from a problem file using the glpk solver.
@@ -819,6 +828,7 @@ class Highs(Solver[None]):
         env: None = None,
         explicit_coordinate_names: bool = False,
         set_names: bool = True,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         """
         Solve a linear problem directly from a linopy model using the HiGHS solver.
@@ -845,6 +855,8 @@ class Highs(Solver[None]):
         set_names : bool, optional
             Whether to set variable and constraint names (default: True).
             Setting to False can significantly speed up model export.
+        calculate_fixed_duals : bool, optional
+            Whether to calculate dual values for MILP problems by fixing integer variables (default: False)
 
         Returns
         -------
@@ -878,6 +890,7 @@ class Highs(Solver[None]):
             model=model,
             io_api="direct",
             sense=model.sense,
+            calculate_fixed_duals=calculate_fixed_duals,
         )
 
     def solve_problem_from_file(
@@ -888,6 +901,7 @@ class Highs(Solver[None]):
         warmstart_fn: Path | None = None,
         basis_fn: Path | None = None,
         env: None = None,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         """
         Solve a linear problem from a problem file using the HiGHS solver.
@@ -909,6 +923,8 @@ class Highs(Solver[None]):
             Path to the basis file.
         env : None, optional
             Environment for the solver
+        calculate_fixed_duals : bool, optional
+            Whether to calculate dual values for MILP problems by fixing integer variables (default: False)
 
         Returns
         -------
@@ -928,6 +944,7 @@ class Highs(Solver[None]):
             basis_fn,
             io_api=read_io_api_from_problem_file(problem_fn),
             sense=read_sense_from_problem_file(problem_fn),
+            calculate_fixed_duals=calculate_fixed_duals,
         )
 
     def _set_solver_params(
@@ -951,6 +968,7 @@ class Highs(Solver[None]):
         model: Model | None = None,
         io_api: str | None = None,
         sense: str | None = None,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         """
         Solve a linear problem from a HiGHS object.
@@ -974,11 +992,15 @@ class Highs(Solver[None]):
             io_api of the problem. For direct API from linopy model this is "direct".
         sense: str
             "min" or "max"
+        calculate_fixed_duals : bool, optional
+            Whether to calculate dual values for MILP problems by fixing integer variables (default: False)
 
         Returns
         -------
         Result
         """
+        import highspy
+
         # https://ergo-code.github.io/HiGHS/dev/structures/enums/#HighsModelStatus
         CONDITION_MAP: dict[highspy.HighsModelStatus, TerminationCondition] = {
             highspy.HighsModelStatus.kNotset: TerminationCondition.unknown,
@@ -1016,6 +1038,23 @@ class Highs(Solver[None]):
         status = Status.from_termination_condition(termination_condition)
         status.legacy_status = h.modelStatusToString(condition)
 
+        fixed_h = None
+        if (
+            calculate_fixed_duals
+            and status.is_ok
+            and (model is None or model.type == "MILP")
+        ):
+            try:
+                ret = h.getFixedLp()
+                if len(ret) > 1:
+                    fixed_lp = ret[1]
+                    fixed_h = highspy.Highs()
+                    fixed_h.setOptionValue("output_flag", False)
+                    fixed_h.passModel(fixed_lp)
+                    fixed_h.run()
+            except Exception as e:  # pragma: no cover - best effort
+                logger.warning(f"Could not calculate fixed duals: {e}")
+
         if basis_fn:
             h.writeBasis(path_to_string(basis_fn))
 
@@ -1026,12 +1065,21 @@ class Highs(Solver[None]):
             objective = h.getObjectiveValue()
             solution = h.getSolution()
 
+            if (
+                fixed_h is not None
+                and fixed_h.getModelStatus() == highspy.HighsModelStatus.kOptimal
+            ):
+                fixed_sol = fixed_h.getSolution()
+                row_dual = fixed_sol.row_dual
+            else:
+                row_dual = solution.row_dual
+
             if model is not None:
                 sol = pd.Series(solution.col_value, model.matrices.vlabels, dtype=float)
-                dual = pd.Series(solution.row_dual, model.matrices.clabels, dtype=float)
+                dual = pd.Series(row_dual, model.matrices.clabels, dtype=float)
             else:
                 sol = pd.Series(solution.col_value, h.getLp().col_names_, dtype=float)
-                dual = pd.Series(solution.row_dual, h.getLp().row_names_, dtype=float)
+                dual = pd.Series(row_dual, h.getLp().row_names_, dtype=float)
 
             return Solution(sol, dual, objective)
 
@@ -1067,6 +1115,7 @@ class Gurobi(Solver["gurobipy.Env | dict[str, Any] | None"]):
         env: gurobipy.Env | dict[str, Any] | None = None,
         explicit_coordinate_names: bool = False,
         set_names: bool = True,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         """
         Solve a linear problem directly from a linopy model using the Gurobi solver.
@@ -1092,6 +1141,8 @@ class Gurobi(Solver["gurobipy.Env | dict[str, Any] | None"]):
         set_names : bool, optional
             Whether to set variable and constraint names (default: True).
             Setting to False can significantly speed up model export.
+        calculate_fixed_duals : bool, optional
+            Whether to calculate dual values for MIP problems by fixing integer variables (default: False)
 
         Returns
         -------
@@ -1119,6 +1170,7 @@ class Gurobi(Solver["gurobipy.Env | dict[str, Any] | None"]):
                 basis_fn=basis_fn,
                 io_api="direct",
                 sense=model.sense,
+                calculate_fixed_duals=calculate_fixed_duals,
             )
 
     def solve_problem_from_file(
@@ -1129,6 +1181,7 @@ class Gurobi(Solver["gurobipy.Env | dict[str, Any] | None"]):
         warmstart_fn: Path | None = None,
         basis_fn: Path | None = None,
         env: gurobipy.Env | dict[str, Any] | None = None,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         """
         Solve a linear problem from a problem file using the Gurobi solver.
@@ -1147,6 +1200,8 @@ class Gurobi(Solver["gurobipy.Env | dict[str, Any] | None"]):
             Path to the warmstart file.
         basis_fn : Path, optional
             Path to the basis file.
+        calculate_fixed_duals : bool, optional
+            Whether to calculate dual values for MIP problems by fixing integer variables (default: False)
         env : gurobipy.Env or dict, optional
             Gurobi environment for the solver, pass env directly or kwargs for creation.
 
@@ -1176,6 +1231,7 @@ class Gurobi(Solver["gurobipy.Env | dict[str, Any] | None"]):
                 basis_fn=basis_fn,
                 io_api=io_api,
                 sense=sense,
+                calculate_fixed_duals=calculate_fixed_duals,
             )
 
     def _solve(
@@ -1187,6 +1243,7 @@ class Gurobi(Solver["gurobipy.Env | dict[str, Any] | None"]):
         basis_fn: Path | None,
         io_api: str | None,
         sense: str | None,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         """
         Solve a linear problem from a Gurobi object.
@@ -1208,6 +1265,8 @@ class Gurobi(Solver["gurobipy.Env | dict[str, Any] | None"]):
             io_api of the problem. For direct API from linopy model this is "direct".
         sense: str
             "min" or "max"
+        calculate_fixed_duals : bool, optional
+            Whether to calculate dual values for MIP problems by fixing integer variables (default: False)
 
         Returns
         -------
@@ -1261,14 +1320,27 @@ class Gurobi(Solver["gurobipy.Env | dict[str, Any] | None"]):
         status = Status.from_termination_condition(termination_condition)
         status.legacy_status = condition
 
+        fixed_m = None
+        if calculate_fixed_duals and status.is_ok and getattr(m, "IsMIP", False):
+            try:
+                fixed_m = m.fixed()
+                fixed_m.Params.OutputFlag = 0
+                fixed_m.optimize()
+            except gurobipy.GurobiError:  # pragma: no cover - best effort
+                logger.warning("Could not calculate fixed duals.")
+
         def get_solver_solution() -> Solution:
             objective = m.ObjVal
 
             sol = pd.Series({v.VarName: v.x for v in m.getVars()}, dtype=float)  # type: ignore
 
+            target_m = m
+            if fixed_m is not None and fixed_m.Status == gurobipy.GRB.OPTIMAL:
+                target_m = fixed_m
+
             try:
                 dual = pd.Series(
-                    {c.ConstrName: c.Pi for c in m.getConstrs()}, dtype=float
+                    {c.ConstrName: c.Pi for c in target_m.getConstrs()}, dtype=float
                 )
             except AttributeError:
                 logger.warning("Dual values of MILP couldn't be parsed")
@@ -1312,6 +1384,7 @@ class Cplex(Solver[None]):
         env: None = None,
         explicit_coordinate_names: bool = False,
         set_names: bool = True,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         msg = "Direct API not implemented for Cplex"
         raise NotImplementedError(msg)
@@ -1324,6 +1397,7 @@ class Cplex(Solver[None]):
         warmstart_fn: Path | None = None,
         basis_fn: Path | None = None,
         env: None = None,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         """
         Solve a linear problem from a problem file using the cplex solver.
@@ -1467,6 +1541,7 @@ class SCIP(Solver[None]):
         env: None = None,
         explicit_coordinate_names: bool = False,
         set_names: bool = True,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         msg = "Direct API not implemented for SCIP"
         raise NotImplementedError(msg)
@@ -1479,6 +1554,7 @@ class SCIP(Solver[None]):
         warmstart_fn: Path | None = None,
         basis_fn: Path | None = None,
         env: None = None,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         """
         Solve a linear problem from a problem file using the scip solver.
@@ -1624,6 +1700,7 @@ class Xpress(Solver[None]):
         env: None = None,
         explicit_coordinate_names: bool = False,
         set_names: bool = True,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         msg = "Direct API not implemented for Xpress"
         raise NotImplementedError(msg)
@@ -1636,6 +1713,7 @@ class Xpress(Solver[None]):
         warmstart_fn: Path | None = None,
         basis_fn: Path | None = None,
         env: None = None,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         """
         Solve a linear problem from a problem file using the Xpress solver.
@@ -2058,6 +2136,7 @@ class Mosek(Solver[None]):
         env: None = None,
         explicit_coordinate_names: bool = False,
         set_names: bool = True,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         """
         Solve a linear problem directly from a linopy model using the MOSEK solver.
@@ -2121,6 +2200,7 @@ class Mosek(Solver[None]):
         warmstart_fn: Path | None = None,
         basis_fn: Path | None = None,
         env: None = None,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         """
         Solve a linear problem from a problem file using the MOSEK solver. Both mps and
@@ -2400,6 +2480,7 @@ class COPT(Solver[None]):
         env: None = None,
         explicit_coordinate_names: bool = False,
         set_names: bool = True,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         msg = "Direct API not implemented for COPT"
         raise NotImplementedError(msg)
@@ -2412,6 +2493,7 @@ class COPT(Solver[None]):
         warmstart_fn: Path | None = None,
         basis_fn: Path | None = None,
         env: None = None,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         """
         Solve a linear problem from a problem file using the COPT solver.
@@ -2542,6 +2624,7 @@ class MindOpt(Solver[None]):
         env: None = None,
         explicit_coordinate_names: bool = False,
         set_names: bool = True,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         msg = "Direct API not implemented for MindOpt"
         raise NotImplementedError(msg)
@@ -2554,6 +2637,7 @@ class MindOpt(Solver[None]):
         warmstart_fn: Path | None = None,
         basis_fn: Path | None = None,
         env: None = None,
+        calculate_fixed_duals: bool = False,
     ) -> Result:
         """
         Solve a linear problem from a problem file using the MindOpt solver.
