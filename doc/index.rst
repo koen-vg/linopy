@@ -110,6 +110,7 @@ This package is published under MIT license.
    creating-expressions
    creating-constraints
    sos-constraints
+   fixed-duals
    manipulating-models
    testing-framework
    transport-tutorial

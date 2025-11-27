@@ -1277,6 +1277,8 @@ class Model:
 
         try:
             solver_class = getattr(solvers, f"{solvers.SolverName(solver_name).name}")
+            # Extract calculate_fixed_duals from solver_options
+            calculate_fixed_duals = solver_options.pop("calculate_fixed_duals", False)
             # initialize the solver as object of solver subclass <solver_class>
             solver = solver_class(
                 **solver_options,
@@ -1291,6 +1293,7 @@ class Model:
                     basis_fn=to_path(basis_fn),
                     env=env,
                     explicit_coordinate_names=explicit_coordinate_names,
+                    calculate_fixed_duals=calculate_fixed_duals,
                 )
             else:
                 if solver_name in ["glpk", "cbc"] and explicit_coordinate_names:
@@ -1312,6 +1315,7 @@ class Model:
                     warmstart_fn=to_path(warmstart_fn),
                     basis_fn=to_path(basis_fn),
                     env=env,
+                    calculate_fixed_duals=calculate_fixed_duals,
                 )
 
         finally:
