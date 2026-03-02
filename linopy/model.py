@@ -158,6 +158,7 @@ class Model:
         "solver_model",
         "solver_name",
         "matrices",
+        "_mip_start",
     )
 
     def __init__(
@@ -216,6 +217,7 @@ class Model:
         )
 
         self.matrices: MatrixAccessor = MatrixAccessor(self)
+        self._mip_start = None
 
     @property
     def variables(self) -> Variables:
