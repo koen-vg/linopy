@@ -244,6 +244,7 @@ class Model:
         "solver_model",
         "solver_name",
         "__weakref__",
+        "_mip_start",
     )
 
     def __init__(
@@ -312,6 +313,7 @@ class Model:
         self._solver_dir: Path = Path(
             gettempdir() if solver_dir is None else solver_dir
         )
+        self._mip_start = None
 
     @property
     def matrices(self) -> MatrixAccessor:
