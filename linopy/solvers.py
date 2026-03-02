@@ -1010,6 +1010,10 @@ class Highs(Solver[None]):
         elif warmstart_fn:
             h.readBasis(path_to_string(warmstart_fn))
 
+        if model is not None and getattr(model, "_mip_start", None) is not None:
+            n_entries, col_indices, col_values = model._mip_start
+            h.setSolution(n_entries, col_indices, col_values)
+
         _run_highs_with_keyboard_interrupt(h)
 
         condition = h.getModelStatus()
@@ -1146,6 +1150,7 @@ class Gurobi(Solver["gurobipy.Env | dict[str, Any] | None"]):
                 io_api="direct",
                 sense=model.sense,
                 calculate_fixed_duals=calculate_fixed_duals,
+                model=model,
             )
 
     def solve_problem_from_file(
@@ -1219,6 +1224,7 @@ class Gurobi(Solver["gurobipy.Env | dict[str, Any] | None"]):
         io_api: str | None,
         sense: str | None,
         calculate_fixed_duals: bool = False,
+        model: Model | None = None,
     ) -> Result:
         """
         Solve a linear problem from a Gurobi object.
@@ -1276,6 +1282,14 @@ class Gurobi(Solver["gurobipy.Env | dict[str, Any] | None"]):
 
         if warmstart_fn is not None:
             m.read(path_to_string(warmstart_fn))
+
+        if model is not None and getattr(model, "_mip_start", None) is not None:
+            n_entries, col_indices, col_values = model._mip_start
+            gurobi_vars = m.getVars()
+            for idx, val in zip(col_indices, col_values):
+                gurobi_vars[int(idx)].Start = float(val)
+            m.update()
+
         m.optimize()
 
         if basis_fn is not None:
