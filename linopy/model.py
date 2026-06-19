@@ -178,6 +178,9 @@ class Model:
         "_solver",
         "_sos_reformulation_state",
         "__weakref__",
+        # GLADE extension: optional MIP start, set as
+        # (n_entries, col_indices, col_values); consumed by the Highs/Gurobi backends.
+        "_mip_start",
     )
 
     def __init__(
@@ -248,6 +251,8 @@ class Model:
         )
         self._solver: solvers.Solver | None = None
         self._sos_reformulation_state: SOSReformulationResult | None = None
+        # GLADE extension: optional MIP start as (n_entries, col_indices, col_values).
+        self._mip_start: tuple[int, Any, Any] | None = None
 
     @property
     def solver(self) -> solvers.Solver | None:
@@ -1867,6 +1872,11 @@ class Model:
         # reset result
         self.reset_solution()
 
+        # GLADE extension: extract the fixed-duals flag so it is not forwarded
+        # to the solver as a (rejected) solver option. It is applied on the
+        # Solver instance below; only the Highs and Gurobi direct backends use it.
+        calculate_fixed_duals = solver_options.pop("calculate_fixed_duals", False)
+
         if log_fn is not None:
             logger.info(f"Solver logs written to `{log_fn}`.")
 
@@ -1922,6 +1932,7 @@ class Model:
                     options=solver_options,
                     **build_kwargs,
                 )
+                solver.calculate_fixed_duals = calculate_fixed_duals
                 if io_api != "direct":
                     problem_fn = solver._problem_fn
                 result = solver.solve(

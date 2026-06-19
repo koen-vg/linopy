@@ -421,6 +421,11 @@ class Solver(ABC, Generic[EnvType]):
     _n_vars: int = field(init=False, default=0, repr=False)
     _n_cons: int = field(init=False, default=0, repr=False)
     _problem_fn: Path | None = field(init=False, default=None, repr=False)
+    # GLADE extension: when True, MIP duals are recovered by re-solving the
+    # problem with all integer variables fixed to their optimal values. Set by
+    # Model.solve() from the ``calculate_fixed_duals`` solver option; only the
+    # Highs and Gurobi direct backends honour it.
+    calculate_fixed_duals: bool = field(init=False, default=False, repr=False)
 
     display_name: ClassVar[str] = ""
     features: ClassVar[frozenset[SolverFeature]] = frozenset()
@@ -1435,6 +1440,14 @@ class Highs(Solver[None]):
         elif warmstart_fn:
             h.readBasis(path_to_string(warmstart_fn))
 
+        # GLADE extension: inject a MIP starting solution if the model carries
+        # one (set via ``Model._mip_start = (n_entries, col_indices, col_values)``).
+        model = self.model
+        mip_start = getattr(model, "_mip_start", None)
+        if mip_start is not None:
+            n_entries, col_indices, col_values = mip_start
+            h.setSolution(n_entries, col_indices, col_values)
+
         _run_highs_with_keyboard_interrupt(h)
 
         condition = h.getModelStatus()
@@ -1443,6 +1456,25 @@ class Highs(Solver[None]):
         )
         status = Status.from_termination_condition(termination_condition)
         status.legacy_status = h.modelStatusToString(condition)
+
+        # GLADE extension: recover dual values for a MILP by re-solving the LP
+        # relaxation with all integer variables fixed to their optimal values.
+        fixed_h = None
+        if (
+            self.calculate_fixed_duals
+            and status.is_ok
+            and (model is None or model.type == "MILP")
+        ):
+            try:
+                ret = h.getFixedLp()
+                if len(ret) > 1:
+                    fixed_lp = ret[1]
+                    fixed_h = highspy.Highs()
+                    fixed_h.setOptionValue("output_flag", False)
+                    fixed_h.passModel(fixed_lp)
+                    fixed_h.run()
+            except Exception as e:  # pragma: no cover - best effort
+                logger.warning(f"Could not calculate fixed duals: {e}")
 
         if basis_fn:
             h.writeBasis(path_to_string(basis_fn))
@@ -1454,7 +1486,13 @@ class Highs(Solver[None]):
             objective = h.getObjectiveValue()
             solution = h.getSolution()
             sol = np.asarray(solution.col_value, dtype=float)
-            dual = np.asarray(solution.row_dual, dtype=float)
+            if (
+                fixed_h is not None
+                and fixed_h.getModelStatus() == highspy.HighsModelStatus.kOptimal
+            ):
+                dual = np.asarray(fixed_h.getSolution().row_dual, dtype=float)
+            else:
+                dual = np.asarray(solution.row_dual, dtype=float)
             if from_file:
                 lp = h.getLp()
                 sol = _solution_from_names(sol, lp.col_names_, self._n_vars)
@@ -1743,6 +1781,18 @@ class Gurobi(Solver["gurobipy.Env | dict[str, Any] | None"]):
 
         if warmstart_fn is not None:
             m.read(path_to_string(warmstart_fn))
+
+        # GLADE extension: inject a MIP starting solution if the model carries
+        # one (set via ``Model._mip_start = (n_entries, col_indices, col_values)``).
+        model = self.model
+        mip_start = getattr(model, "_mip_start", None)
+        if mip_start is not None:
+            _, col_indices, col_values = mip_start
+            gurobi_vars = m.getVars()
+            for idx, val in zip(col_indices, col_values):
+                gurobi_vars[int(idx)].Start = float(val)
+            m.update()
+
         m.optimize()
 
         if basis_fn is not None:
@@ -1762,6 +1812,17 @@ class Gurobi(Solver["gurobipy.Env | dict[str, Any] | None"]):
         status = Status.from_termination_condition(termination_condition)
         status.legacy_status = condition
 
+        # GLADE extension: recover dual values for a MIP by re-solving the
+        # problem with all integer variables fixed to their optimal values.
+        fixed_m = None
+        if self.calculate_fixed_duals and status.is_ok and getattr(m, "IsMIP", False):
+            try:
+                fixed_m = m.fixed()
+                fixed_m.Params.OutputFlag = 0
+                fixed_m.optimize()
+            except gurobipy.GurobiError:  # pragma: no cover - best effort
+                logger.warning("Could not calculate fixed duals.")
+
         def get_solver_solution() -> Solution:
             objective = m.ObjVal
 
@@ -1774,8 +1835,12 @@ class Gurobi(Solver["gurobipy.Env | dict[str, Any] | None"]):
             else:
                 sol = _solution_from_labels(sol, self._vlabels, self._n_vars)
 
+            target_m = m
+            if fixed_m is not None and fixed_m.Status == gurobipy.GRB.OPTIMAL:
+                target_m = fixed_m
+
             try:
-                constrs = m.getConstrs()
+                constrs = target_m.getConstrs()
                 dual = np.array([c.Pi for c in constrs], dtype=float)
                 if from_file:
                     dual = _solution_from_names(

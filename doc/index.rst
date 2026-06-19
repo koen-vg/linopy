@@ -129,6 +129,7 @@ This package is published under MIT license.
 
    sos-constraints
    piecewise-linear-constraints
+   fixed-duals
    testing-framework
 
 .. toctree::
