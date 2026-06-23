@@ -945,12 +945,29 @@ class CSRConstraint(ConstraintBase):
     def to_matrix_with_rhs(
         self, label_index: VariableLabelIndex
     ) -> tuple[scipy.sparse.csr_array, np.ndarray, np.ndarray, np.ndarray]:
-        """Return (csr, con_labels, b, sense) — all pre-stored, no recomputation."""
+        """Return (csr, con_labels, b, sense) — all pre-stored, no recomputation.
+
+        The CSR is cached at freeze time with as many columns as there were
+        active variables then. If variables were added afterwards (e.g. an
+        auxiliary variable introduced by a constraint added after the model was
+        built), the active-variable count has grown and the cached CSR is too
+        narrow to be stacked with constraints frozen later. Variable positions
+        are stable under additions, so widening the column dimension just
+        appends empty trailing columns and keeps the stacked constraint matrix
+        consistent.
+        """
         if isinstance(self._sign, str):
             sense = np.full(len(self._rhs), self._sign[0])
         else:
             sense = np.array([s[0] for s in self._sign])
-        return self._csr, self._con_labels, self._rhs, sense
+        csr = self._csr
+        n_active_vars = label_index.n_active_vars
+        if csr.shape[1] < n_active_vars:
+            csr = scipy.sparse.csr_array(
+                (csr.data, csr.indices, csr.indptr),
+                shape=(csr.shape[0], n_active_vars),
+            )
+        return csr, self._con_labels, self._rhs, sense
 
     def active_labels(self) -> np.ndarray:
         return self._con_labels

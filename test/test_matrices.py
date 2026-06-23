@@ -77,3 +77,26 @@ def test_matrices_float_c() -> None:
 
     c = m.matrices.c
     assert np.all(c == np.array([1.5, 1.5]))
+
+
+def test_matrices_frozen_constraint_widened_after_adding_variables() -> None:
+    """Regression test: ``freeze_constraints=True`` followed by variables and a
+    constraint added afterwards must still assemble a consistent matrix.
+
+    Each frozen constraint caches its CSR at the active-variable count present
+    when it was frozen. Adding variables later grows that count, so the earlier
+    constraint's CSR must be widened to the current count before the constraint
+    blocks are stacked, otherwise the stack fails with an axis-1 dimension
+    mismatch.
+    """
+    m = Model(freeze_constraints=True)
+    x = m.add_variables(lower=0, coords=[range(100)], dims=["i"], name="x")
+    m.add_constraints(x >= 1, name="c_base")
+    # New variables and a constraint added after ``c_base`` has been frozen.
+    y = m.add_variables(lower=0, coords=[range(50)], dims=["j"], name="y")
+    m.add_constraints(y >= 2, name="c_after")
+    m.add_objective(x.sum() + y.sum())
+
+    n_vars = m.variables.label_index.n_active_vars
+    assert m.matrices.A.shape[1] == n_vars
+    assert m.matrices.A.shape[0] == m.matrices.clabels.shape[0]
