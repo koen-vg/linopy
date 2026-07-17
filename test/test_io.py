@@ -100,6 +100,71 @@ def test_model_to_netcdf_frozen_constraint(tmp_path: Path) -> None:
     assert_model_equal(m, p)
 
 
+def test_model_to_netcdf_frozen_constraint_nonalphabetical_order(
+    tmp_path: Path,
+) -> None:
+    """
+    Frozen (CSR) constraint columns must survive a netcdf roundtrip even when
+    variables were not added in alphabetical order.
+
+    CSR column indices are dense positions into the active-variable ordering,
+    which follows variable insertion order. ``read_netcdf`` must rebuild
+    variables in that order (recorded via ``_variable_order``); rebuilding them
+    sorted by name would silently attach coefficients to the wrong variables.
+    """
+    from linopy.constraints import CSRConstraint
+
+    m = Model()
+    # Insertion order (z, a) differs from alphabetical order (a, z).
+    z = m.add_variables(lower=0, name="z")
+    a = m.add_variables(lower=0, name="a")
+    m.add_constraints(2 * z + 3 * a >= 1, name="c", freeze=True)
+    assert isinstance(m.constraints["c"], CSRConstraint)
+
+    fn = tmp_path / "test_frozen_order.nc"
+    m.to_netcdf(fn)
+    p = read_netcdf(fn)
+
+    assert isinstance(p.constraints["c"], CSRConstraint)
+    # The coefficient-to-variable mapping must be preserved exactly.
+    np.testing.assert_array_equal(
+        m.constraints["c"].data.vars.values, p.constraints["c"].data.vars.values
+    )
+    np.testing.assert_array_equal(
+        m.constraints["c"].data.coeffs.values, p.constraints["c"].data.coeffs.values
+    )
+    assert_model_equal(m, p)
+
+
+def test_read_netcdf_frozen_constraint_legacy_no_variable_order(
+    tmp_path: Path,
+) -> None:
+    """
+    Legacy files without ``_variable_order`` still load. Alphabetically-built
+    models roundtrip correctly on the sorted-order fallback; the attribute-less
+    read path must not raise.
+    """
+    from linopy.constraints import CSRConstraint
+
+    m = Model()
+    # Alphabetical insertion order, so the sorted-order fallback is correct.
+    a = m.add_variables(lower=0, name="a")
+    b = m.add_variables(lower=0, name="b")
+    m.add_constraints(2 * a + 3 * b >= 1, name="c", freeze=True)
+
+    fn = tmp_path / "test.nc"
+    m.to_netcdf(fn)
+
+    ds = xr.load_dataset(fn).load()
+    del ds.attrs["_variable_order"]
+    fn_legacy = tmp_path / "legacy.nc"
+    ds.to_netcdf(fn_legacy)
+
+    p = read_netcdf(fn_legacy)
+    assert isinstance(p.constraints["c"], CSRConstraint)
+    assert_model_equal(m, p)
+
+
 def test_model_to_netcdf_mixed_sign_constraint(tmp_path: Path) -> None:
     from linopy.constraints import CSRConstraint
 

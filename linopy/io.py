@@ -989,6 +989,12 @@ def to_netcdf(m: Model, *args: Any, **kwargs: Any) -> None:
     ds = xr.merge(vars + cons + obj + params, combine_attrs="drop_conflicts")
     ds = ds.assign_attrs(scalars)
     ds.attrs[NETCDF_VERSION_ATTR] = version("linopy")
+    # Record the variable insertion order. Frozen (CSR) constraints store
+    # column indices as dense positions into the active-variable ordering,
+    # which follows variable insertion order; ``read_netcdf`` must rebuild
+    # variables in that same order or those columns decode to the wrong
+    # variables. See the ``_variable_order`` handling in ``read_netcdf``.
+    ds.attrs["_variable_order"] = json.dumps(list(m.variables))
     if m._relaxed_registry:
         ds.attrs["_relaxed_registry"] = json.dumps(m._relaxed_registry)
     if m._piecewise_formulations:
@@ -1088,8 +1094,24 @@ def read_netcdf(path: Path | str, **kwargs: Any) -> Model:
 
     vars = [str(k) for k in ds if str(k).startswith("variables")]
     var_names = list({str(k).rsplit("-", 1)[0] for k in vars})
+    # Rebuild variables in their original insertion order when the file
+    # records it (``_variable_order``), so the active-variable ordering that
+    # frozen (CSR) constraint columns index into is reproduced exactly.
+    # Legacy files without the attribute fall back to sorted order, matching
+    # historical behaviour; for such files a frozen constraint built by a
+    # model whose variables were not added alphabetically may decode its
+    # columns to the wrong variables (there is no recorded order to recover).
+    order_attr = ds.attrs.get("_variable_order")
+    if order_attr is not None:
+        prefix_by_ref = {remove_prefix(k, "variables"): k for k in var_names}
+        ref_order = [r for r in json.loads(order_attr) if r in prefix_by_ref]
+        ordered_keys = [prefix_by_ref[r] for r in ref_order]
+        # Defensive: append any keys not covered by the recorded order.
+        ordered_keys += [k for k in sorted(var_names) if k not in ordered_keys]
+    else:
+        ordered_keys = sorted(var_names)
     variables = {}
-    for k in sorted(var_names):
+    for k in ordered_keys:
         name = remove_prefix(k, "variables")
         variables[name] = Variable(get_prefix(ds, k), m, name)
 
